@@ -1,0 +1,3742 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="A procedurally generated alien planet you can walk around in VR, straight from the browser.">
+<title>No Man's Sky VR — Quest 3 WebXR</title>
+
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin:0; padding:0; height:100%; background:#05070d; overflow:hidden; }
+  #gl { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
+  #ui {
+    position:fixed; inset:0; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:18px; font-family:"Segoe UI",system-ui,sans-serif;
+    color:#cfe9ff; text-align:center; padding:24px; box-sizing:border-box;
+    background:radial-gradient(120% 90% at 50% 10%, rgba(30,60,110,.55), rgba(4,6,12,.92));
+    transition:opacity .5s; z-index:10;
+  }
+  #ui.hidden { opacity:0; pointer-events:none; }
+  h1 { margin:0; font-size:clamp(28px,6vw,58px); letter-spacing:.22em; font-weight:200; text-transform:uppercase; }
+  h1 b { font-weight:600; color:#ffb463; }
+  #sub { margin:0; opacity:.65; font-size:14px; letter-spacing:.28em; text-transform:uppercase; }
+  button {
+    font:600 16px/1 "Segoe UI",system-ui,sans-serif; letter-spacing:.16em; text-transform:uppercase;
+    color:#04121c; background:linear-gradient(#8fe3ff,#37b6e8); border:0; border-radius:999px;
+    padding:16px 38px; cursor:pointer; box-shadow:0 0 34px rgba(60,180,240,.45);
+  }
+  button:disabled { filter:grayscale(1) brightness(.6); cursor:default; box-shadow:none; }
+  button.alt { background:linear-gradient(#ffd9a3,#ff9a3c); box-shadow:0 0 34px rgba(255,150,60,.35); }
+  #keys { font-size:12.5px; line-height:1.9; opacity:.62; max-width:640px; }
+  #start {
+    font-size:13.5px; line-height:1.95; max-width:680px; text-align:left;
+    background:rgba(20,50,85,.42); border:1px solid rgba(110,190,255,.3);
+    border-radius:12px; padding:14px 20px; color:#dcefff;
+  }
+  #start b { color:#ffb463; }
+  kbd { background:#12233a; border:1px solid #27466e; border-radius:5px; padding:1px 7px; font-family:inherit; font-size:11.5px; }
+  #msg { font-size:13px; opacity:.75; min-height:18px; letter-spacing:.06em; }
+  #log {
+    font:11.5px/1.55 Consolas,monospace; color:#ffb0a0; background:rgba(60,10,10,.45);
+    border:1px solid rgba(255,120,90,.35); border-radius:8px; margin:0; padding:0;
+    max-width:min(92vw,720px); max-height:26vh; overflow:auto; white-space:pre-wrap;
+    text-align:left; display:none;
+  }
+  #log.on { display:block; padding:10px 14px; }
+  #hud2d {
+    position:fixed; left:14px; top:12px; z-index:5; font:12px/1.6 "Consolas",monospace;
+    color:#9fdcff; text-shadow:0 0 8px #000; pointer-events:none; white-space:pre; opacity:.85;
+  }
+  @media (prefers-color-scheme: light) { html,body{background:#05070d;} }
+</style>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+<div id="hud2d"></div>
+<div id="ui">
+  <p id="sub">Procedural Universe · WebXR</p>
+  <h1>No Man's <b>Sky</b> VR</h1>
+  <div id="msg">initialising…</div>
+  <pre id="log"></pre>
+  <button id="vr" disabled>Enter VR</button>
+  <button id="flat" class="alt">Play on Desktop</button>
+  <div id="start">
+    <b>HOW TO START</b> — you wake on an unexplored world with an empty warp drive.<br>
+    <b>1.</b> A <i>glowing path of pips</i> and a chevron point at the nearest salvage site — walk or fly along it.<br>
+    <b>2.</b> Touch the site to claim resources and warp charge. Mine rocks with the trigger for more.<br>
+    <b>3.</b> At 30% charge, open the nav hologram on your left hand and warp to a new planet. At 90% you can cross to another star.
+  </div>
+  <div id="keys">
+    <b>QUEST 3 / VR</b><br>
+    Left stick — walk &nbsp;·&nbsp; <b>push it fully to sprint</b> (or hold left grip) &nbsp;·&nbsp; Right grip — jetpack<br>
+    Right stick — snap turn<br>
+    Right trigger — mining beam &nbsp;·&nbsp; Left trigger — scanner pulse<br>
+    Left <kbd>Y</kbd> — open the holo nav on your hand &nbsp;·&nbsp; Left <kbd>X</kbd> — surface / system / galaxy<br>
+    Point &amp; right trigger — select &nbsp;·&nbsp; Right <kbd>A</kbd> — engage warp &nbsp;·&nbsp; Right stick — spin &amp; zoom the map<br><br>
+    <b>DESKTOP</b><br>
+    <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp;·&nbsp; mouse look &nbsp;·&nbsp; <kbd>Space</kbd> jetpack &nbsp;·&nbsp;
+    <kbd>Shift</kbd> sprint &nbsp;·&nbsp; click mine &nbsp;·&nbsp; <kbd>R</kbd> scan<br>
+    <kbd>M</kbd> nav map &nbsp;·&nbsp; <kbd>Tab</kbd> map mode &nbsp;·&nbsp; click select &nbsp;·&nbsp; <kbd>E</kbd> engage warp &nbsp;·&nbsp; arrows spin/zoom
+  </div>
+</div>
+
+<script>
+'use strict';
+/* =========================================================================
+   NO MAN'S SKY VR — a dependency-free WebXR procedural planet explorer.
+   Raw WebGL2. Everything (terrain, flora, creatures, sky, audio) is
+   generated from a single 32-bit planet seed.
+   ========================================================================= */
+
+/* ---------------------------------------------------------------- math -- */
+const V3 = {
+  add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+  sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  scale: (a, s) => [a[0] * s, a[1] * s, a[2] * s],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  len: a => Math.hypot(a[0], a[1], a[2]),
+  norm(a) { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; },
+};
+
+// Column-major 4x4, WebGL layout.
+const M4 = {
+  ident: () => new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]),
+  mul(out, a, b) {
+    for (let c = 0; c < 4; c++) {
+      const b0 = b[c * 4], b1 = b[c * 4 + 1], b2 = b[c * 4 + 2], b3 = b[c * 4 + 3];
+      out[c * 4]     = a[0] * b0 + a[4] * b1 + a[8]  * b2 + a[12] * b3;
+      out[c * 4 + 1] = a[1] * b0 + a[5] * b1 + a[9]  * b2 + a[13] * b3;
+      out[c * 4 + 2] = a[2] * b0 + a[6] * b1 + a[10] * b2 + a[14] * b3;
+      out[c * 4 + 3] = a[3] * b0 + a[7] * b1 + a[11] * b2 + a[15] * b3;
+    }
+    return out;
+  },
+  // Rigid transform + non-uniform scale, from quaternion.
+  compose(out, q, t, s) {
+    const [x, y, z, w] = q, sx = s[0], sy = s[1], sz = s[2];
+    const x2 = x + x, y2 = y + y, z2 = z + z;
+    const xx = x * x2, xy = x * y2, xz = x * z2;
+    const yy = y * y2, yz = y * z2, zz = z * z2;
+    const wx = w * x2, wy = w * y2, wz = w * z2;
+    out[0] = (1 - (yy + zz)) * sx; out[1] = (xy + wz) * sx;       out[2] = (xz - wy) * sx;       out[3] = 0;
+    out[4] = (xy - wz) * sy;       out[5] = (1 - (xx + zz)) * sy; out[6] = (yz + wx) * sy;       out[7] = 0;
+    out[8] = (xz + wy) * sz;       out[9] = (yz - wx) * sz;       out[10] = (1 - (xx + yy)) * sz; out[11] = 0;
+    out[12] = t[0]; out[13] = t[1]; out[14] = t[2]; out[15] = 1;
+    return out;
+  },
+  perspective(out, fovy, aspect, near, far) {
+    const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    out.fill(0);
+    out[0] = f / aspect; out[5] = f; out[10] = (far + near) * nf;
+    out[11] = -1; out[14] = 2 * far * near * nf;
+    return out;
+  },
+  invert(out, m) {
+    const a00=m[0],a01=m[1],a02=m[2],a03=m[3], a10=m[4],a11=m[5],a12=m[6],a13=m[7],
+          a20=m[8],a21=m[9],a22=m[10],a23=m[11], a30=m[12],a31=m[13],a32=m[14],a33=m[15];
+    const b00=a00*a11-a01*a10, b01=a00*a12-a02*a10, b02=a00*a13-a03*a10,
+          b03=a01*a12-a02*a11, b04=a01*a13-a03*a11, b05=a02*a13-a03*a12,
+          b06=a20*a31-a21*a30, b07=a20*a32-a22*a30, b08=a20*a33-a23*a30,
+          b09=a21*a32-a22*a31, b10=a21*a33-a23*a31, b11=a22*a33-a23*a32;
+    let det = b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06;
+    if (!det) return M4.ident();
+    det = 1 / det;
+    out[0]=(a11*b11-a12*b10+a13*b09)*det; out[1]=(a02*b10-a01*b11-a03*b09)*det;
+    out[2]=(a31*b05-a32*b04+a33*b03)*det; out[3]=(a22*b04-a21*b05-a23*b03)*det;
+    out[4]=(a12*b08-a10*b11-a13*b07)*det; out[5]=(a00*b11-a02*b08+a03*b07)*det;
+    out[6]=(a32*b02-a30*b05-a33*b01)*det; out[7]=(a20*b05-a22*b02+a23*b01)*det;
+    out[8]=(a10*b10-a11*b08+a13*b06)*det; out[9]=(a01*b08-a00*b10-a03*b06)*det;
+    out[10]=(a30*b04-a31*b02+a33*b00)*det; out[11]=(a21*b02-a20*b04-a23*b00)*det;
+    out[12]=(a11*b07-a10*b09-a12*b06)*det; out[13]=(a00*b09-a01*b07+a02*b06)*det;
+    out[14]=(a31*b01-a30*b03-a32*b00)*det; out[15]=(a20*b03-a21*b01+a22*b00)*det;
+    return out;
+  },
+  xform(m, p) {
+    return [m[0]*p[0]+m[4]*p[1]+m[8]*p[2]+m[12],
+            m[1]*p[0]+m[5]*p[1]+m[9]*p[2]+m[13],
+            m[2]*p[0]+m[6]*p[1]+m[10]*p[2]+m[14]];
+  },
+  xformDir(m, p) {
+    return [m[0]*p[0]+m[4]*p[1]+m[8]*p[2],
+            m[1]*p[0]+m[5]*p[1]+m[9]*p[2],
+            m[2]*p[0]+m[6]*p[1]+m[10]*p[2]];
+  },
+  // Object -> world basis that maps local +Z onto `fwd`.
+  aim(out, pos, fwd, upHint) {
+    const z = V3.norm(fwd);
+    let x = V3.cross(upHint, z);
+    if (V3.len(x) < 1e-4) x = V3.cross([1, 0, 0], z);
+    x = V3.norm(x);
+    const y = V3.cross(z, x);
+    out[0]=x[0]; out[1]=x[1]; out[2]=x[2];  out[3]=0;
+    out[4]=y[0]; out[5]=y[1]; out[6]=y[2];  out[7]=0;
+    out[8]=z[0]; out[9]=z[1]; out[10]=z[2]; out[11]=0;
+    out[12]=pos[0]; out[13]=pos[1]; out[14]=pos[2]; out[15]=1;
+    return out;
+  },
+};
+
+const Q = {
+  yaw: a => [0, Math.sin(a / 2), 0, Math.cos(a / 2)],
+  conj: q => [-q[0], -q[1], -q[2], q[3]],
+  rot(q, v) {
+    const [x, y, z, w] = q;
+    const ix = w*v[0] + y*v[2] - z*v[1], iy = w*v[1] + z*v[0] - x*v[2],
+          iz = w*v[2] + x*v[1] - y*v[0], iw = -x*v[0] - y*v[1] - z*v[2];
+    return [ix*w + iw*-x + iy*-z - iz*-y,
+            iy*w + iw*-y + iz*-x - ix*-z,
+            iz*w + iw*-z + ix*-y - iy*-x];
+  },
+};
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = t => t * t * (3 - 2 * t);
+
+/* --------------------------------------------------------------- noise -- */
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Deterministic hash of integer lattice points -> [0,1).
+function hash2i(x, y, s) {
+  let h = Math.imul(x, 374761393) ^ Math.imul(y, 668265263) ^ Math.imul(s, 2246822519);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+// 2D simplex noise, seeded via a shuffled permutation table.
+function makeNoise(seed) {
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  const rnd = mulberry32(seed);
+  for (let i = 255; i > 0; i--) {
+    const j = (rnd() * (i + 1)) | 0;
+    const t = p[i]; p[i] = p[j]; p[j] = t;
+  }
+  const perm = new Uint8Array(512), permMod12 = new Uint8Array(512);
+  for (let i = 0; i < 512; i++) { perm[i] = p[i & 255]; permMod12[i] = perm[i] % 12; }
+  const G = [[1,1],[-1,1],[1,-1],[-1,-1],[1,0],[-1,0],[1,0],[-1,0],[0,1],[0,-1],[0,1],[0,-1]];
+  const F2 = 0.5 * (Math.sqrt(3) - 1), G2 = (3 - Math.sqrt(3)) / 6;
+
+  function noise2(xin, yin) {
+    const s = (xin + yin) * F2;
+    const i = Math.floor(xin + s), j = Math.floor(yin + s);
+    const t = (i + j) * G2;
+    const x0 = xin - (i - t), y0 = yin - (j - t);
+    const i1 = x0 > y0 ? 1 : 0, j1 = x0 > y0 ? 0 : 1;
+    const x1 = x0 - i1 + G2, y1 = y0 - j1 + G2;
+    const x2 = x0 - 1 + 2 * G2, y2 = y0 - 1 + 2 * G2;
+    const ii = i & 255, jj = j & 255;
+    let n = 0;
+    let t0 = 0.5 - x0 * x0 - y0 * y0;
+    if (t0 > 0) { const g = G[permMod12[ii + perm[jj]]]; t0 *= t0; n += t0 * t0 * (g[0] * x0 + g[1] * y0); }
+    let t1 = 0.5 - x1 * x1 - y1 * y1;
+    if (t1 > 0) { const g = G[permMod12[ii + i1 + perm[jj + j1]]]; t1 *= t1; n += t1 * t1 * (g[0] * x1 + g[1] * y1); }
+    let t2 = 0.5 - x2 * x2 - y2 * y2;
+    if (t2 > 0) { const g = G[permMod12[ii + 1 + perm[jj + 1]]]; t2 *= t2; n += t2 * t2 * (g[0] * x2 + g[1] * y2); }
+    return 70 * n;
+  }
+
+  function fbm(x, y, oct, lac, gain) {
+    let a = 1, f = 1, sum = 0, norm = 0;
+    for (let i = 0; i < oct; i++) {
+      sum += a * noise2(x * f, y * f);
+      norm += a; a *= gain; f *= lac;
+    }
+    return sum / norm;
+  }
+  function ridged(x, y, oct, lac, gain) {
+    let a = 1, f = 1, sum = 0, norm = 0;
+    for (let i = 0; i < oct; i++) {
+      const n = 1 - Math.abs(noise2(x * f, y * f));
+      sum += a * n * n; norm += a; a *= gain; f *= lac;
+    }
+    return sum / norm;
+  }
+  return { noise2, fbm, ridged };
+}
+/* ----------------------------------------------------------------- gl -- */
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl2', {
+  antialias: true, alpha: false, depth: true, stencil: false,
+  powerPreference: 'high-performance', xrCompatible: true,
+});
+if (!gl) {
+  document.getElementById('msg').textContent = 'WebGL2 is not available in this browser.';
+  throw new Error('no webgl2');
+}
+
+/* On a headset there is no console, so surface failures on the page itself.
+   The overlay reappears when the immersive session ends. */
+const diag = { lines: [], frames: 0, nullPose: 0, space: '?', err: null };
+function logDiag(msg) {
+  const s = String(msg);
+  if (diag.lines[diag.lines.length - 1] === s) return;   // collapse repeats
+  diag.lines.push(s);
+  if (diag.lines.length > 12) diag.lines.shift();
+  const el = document.getElementById('log');
+  if (el) { el.textContent = diag.lines.join('\n'); el.classList.add('on'); }
+  console.error(msg);
+}
+addEventListener('error', e => logDiag('JS error: ' + e.message + '  (line ' + e.lineno + ')'));
+addEventListener('unhandledrejection', e => logDiag('Unhandled promise: ' + ((e.reason && e.reason.message) || e.reason)));
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error(gl.getShaderInfoLog(s), src.split('\n').map((l, i) => (i + 1) + ': ' + l).join('\n'));
+    throw new Error('shader compile failed');
+  }
+  return s;
+}
+function program(vsSrc, fsSrc) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const info = gl.getActiveUniform(p, i);
+    const name = info.name.replace(/\[0\]$/, '');
+    u[name] = gl.getUniformLocation(p, name);
+  }
+  return { p, u };
+}
+
+/* Attribute layout shared by every mesh program:
+   0 position | 1 normal | 2 colour | 3 wave-weight
+   4 instance pos+scale | 5 instance rotY+tint | 6 instance phase/sway/emissive */
+const HEAD = `#version 300 es
+precision highp float;
+`;
+
+// Sky, lighting and fog helpers shared by most fragment shaders.
+const SKY_LIB = `
+uniform vec3 uZenith, uHorizon, uGround, uSunDir, uSunCol;
+uniform float uFogDensity, uSpace;
+vec3 skyBase(vec3 d){
+  float up = clamp(d.y, 0.0, 1.0);
+  vec3 c = mix(uHorizon, uZenith, pow(up, 0.62));
+  if (d.y < 0.0) c = mix(uHorizon, uGround, smoothstep(0.0, -0.30, d.y));
+  c *= (1.0 - uSpace * 0.97);            // atmosphere thins out to black
+  float sd = max(dot(d, uSunDir), 0.0);
+  c += uSunCol * pow(sd, 6.0) * 0.28 * (1.0 - uSpace * 0.85);
+  c += uSunCol * pow(sd, 90.0) * 0.55;   // the star stays sharp in vacuum
+  return c;
+}
+vec3 applyFog(vec3 col, vec3 wp, vec3 cam){
+  vec3 v = wp - cam;
+  float dist = length(v);
+  vec3 dir = v / max(dist, 1e-4);
+  float f = clamp(1.0 - exp(-pow(dist * uFogDensity, 1.7)), 0.0, 1.0);
+  return mix(col, skyBase(dir), f);
+}
+vec3 shade(vec3 n, vec3 albedo, vec3 view){
+  // Wrapped diffuse keeps the terminator soft; sky/ground irradiance fills
+  // the unlit side so nothing reads as pure black.
+  float ndl = dot(n, uSunDir);
+  vec3 sun = uSunCol * clamp((ndl + 0.28) / 1.28, 0.0, 1.0) * 1.30;
+  vec3 skyAmb = mix(uHorizon, uZenith, 0.45);
+  vec3 amb = mix(uGround * 1.15 + uHorizon * 0.22, skyAmb * 0.95,
+                 clamp(n.y * 0.5 + 0.5, 0.0, 1.0)) * 0.80;
+  vec3 col = albedo * (sun + amb);
+  float rim = pow(1.0 - clamp(dot(n, view), 0.0, 1.0), 3.0);
+  col += uHorizon * rim * 0.22 * albedo;
+  return col;
+}
+`;
+
+const NOISE_LIB = `
+float h13(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.yzx + 33.33); return fract((p.x + p.y) * p.z); }
+float vnoise(vec3 p){
+  vec3 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float n000=h13(i), n100=h13(i+vec3(1,0,0)), n010=h13(i+vec3(0,1,0)), n110=h13(i+vec3(1,1,0));
+  float n001=h13(i+vec3(0,0,1)), n101=h13(i+vec3(1,0,1)), n011=h13(i+vec3(0,1,1)), n111=h13(i+vec3(1,1,1));
+  return mix(mix(mix(n000,n100,f.x), mix(n010,n110,f.x), f.y),
+             mix(mix(n001,n101,f.x), mix(n011,n111,f.x), f.y), f.z);
+}
+float fbm3(vec3 p){
+  float a = 0.5, s = 0.0;
+  for (int i = 0; i < 5; i++) { s += a * vnoise(p); p *= 2.03; a *= 0.5; }
+  return s;
+}
+`;
+
+/* --------------------------------------------------------------- sky ---- */
+const progSky = program(HEAD + `
+out vec3 vRay;
+uniform mat4 uInvVP;
+uniform vec3 uCam;
+void main(){
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2) * 2.0 - 1.0;
+  vec4 far = uInvVP * vec4(p, 1.0, 1.0);
+  vRay = far.xyz / far.w - uCam;
+  gl_Position = vec4(p, 1.0, 1.0);
+}`, HEAD + SKY_LIB + NOISE_LIB + `
+in vec3 vRay;
+out vec4 fragColor;
+uniform float uTime, uStars, uCloud;
+uniform vec4 uBodyDir[3];   // xyz = direction, w = cos(angular radius)
+uniform vec4 uBodyCol[3];   // rgb = albedo, a = ring flag
+uniform vec3 uNebula;
+
+void main(){
+  vec3 d = normalize(vRay);
+  vec3 col = skyBase(d);
+
+  // Deep-space backdrop: milky band + nebula clouds + stars, faded by daylight.
+  float night = max(uStars, uSpace) * mix(smoothstep(-0.05, 0.30, d.y), 1.0, uSpace);
+  if (night > 0.001) {
+    float band = exp(-pow(abs(dot(d, normalize(vec3(0.35, 0.62, -0.7)))) * 3.4, 2.0));
+    float neb = fbm3(d * 4.0 + 11.0);
+    col += uNebula * (band * 0.55 + neb * neb * 0.45) * night;
+    vec3 s = d * 320.0;
+    vec3 c = floor(s), f = fract(s) - 0.5;
+    float hh = h13(c);
+    float star = smoothstep(0.9955, 1.0, hh) * exp(-dot(f, f) * 55.0);
+    col += vec3(0.85, 0.92, 1.0) * star * (12.0 * night);
+  }
+
+  // Moons / sister planets hanging in the sky.
+  for (int i = 0; i < 3; i++) {
+    vec4 bd = uBodyDir[i];
+    if (bd.w >= 1.0) continue;
+    vec3 dir = normalize(bd.xyz);
+    vec3 t = normalize(cross(vec3(0.0, 1.0, 0.0), dir));
+    vec3 b = cross(dir, t);
+    float sr = sqrt(max(1.0 - bd.w * bd.w, 1e-6));
+    float u = dot(d, t) / sr, v = dot(d, b) / sr;
+    float rr = u * u + v * v;
+    if (uBodyCol[i].a > 0.5) {           // planetary ring
+      float e = sqrt(u * u + (v / 0.22) * (v / 0.22));
+      float ring = smoothstep(1.35, 1.45, e) * (1.0 - smoothstep(2.05, 2.2, e));
+      col = mix(col, uBodyCol[i].rgb * 1.15, ring * 0.55 * step(0.0, dot(d, dir)));
+    }
+    if (rr < 1.0 && dot(d, dir) > 0.0) {
+      float z = sqrt(max(0.0, 1.0 - rr));
+      vec3 n = normalize(t * u + b * v + dir * z);
+      float l = clamp(dot(n, uSunDir), -1.0, 1.0) * 0.5 + 0.5;
+      float detail = fbm3(n * 3.2 + float(i) * 9.0);
+      vec3 bc = uBodyCol[i].rgb * mix(0.75, 1.25, detail) * (0.10 + 0.95 * l * l);
+      float edge = smoothstep(1.0, 0.95, rr);
+      col = mix(col, bc, edge);
+    }
+  }
+
+  // Volumetric-ish cloud deck.
+  if (d.y > 0.008 && uCloud * (1.0 - uSpace) > 0.01) {
+    vec3 cp = vec3(d.x / d.y * 0.55 + uTime * 0.004, 0.5, d.z / d.y * 0.55);
+    float c = fbm3(cp * 1.7);
+    c = smoothstep(0.50 - uCloud * 0.26, 0.80, c);
+    float fade = smoothstep(0.0, 0.28, d.y) * (1.0 - smoothstep(0.55, 1.0, d.y) * 0.55);
+    vec3 lit = mix(uHorizon * 1.25, uSunCol * 1.25, clamp(dot(d, uSunDir) * 0.5 + 0.5, 0.0, 1.0));
+    col = mix(col, lit, c * fade * uCloud * (1.0 - uSpace));
+  }
+  fragColor = vec4(col, 1.0);
+}`);
+
+/* ------------------------------------------------------------ terrain --- */
+const progTerrain = program(HEAD + `
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+layout(location=2) in vec3 aCol;
+uniform mat4 uVP;
+out vec3 vN, vC, vW;
+void main(){ vN = aNrm; vC = aCol; vW = aPos; gl_Position = uVP * vec4(aPos, 1.0); }
+`, HEAD + SKY_LIB + `
+in vec3 vN, vC, vW;
+out vec4 fragColor;
+uniform vec3 uCam;
+void main(){
+  vec3 n = normalize(vN);
+  vec3 view = normalize(uCam - vW);
+  // Cheap procedural grain so large flat areas keep some texture.
+  float g = fract(sin(dot(floor(vW.xz * 5.0), vec2(12.9898, 78.233))) * 43758.5453);
+  vec3 albedo = vC * (0.98 + 0.035 * g);
+  vec3 col = shade(n, albedo, view);
+  fragColor = vec4(applyFog(col, vW, uCam), 1.0);
+}`);
+
+/* -------------------------------------------------- instanced scatter --- */
+const progInst = program(HEAD + `
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+layout(location=2) in vec3 aCol;
+layout(location=3) in float aWave;
+layout(location=4) in vec4 iPosScale;
+layout(location=5) in vec4 iRotTint;
+layout(location=6) in vec4 iParams;   // phase, sway, emissive, fade radius
+uniform mat4 uVP;
+uniform float uTime;
+uniform vec3 uCam;
+out vec3 vN, vC, vW;
+out float vE, vFade;
+void main(){
+  float c = cos(iRotTint.x), s = sin(iRotTint.x);
+  mat3 rot = mat3(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c);
+  vec3 p = rot * (aPos * iPosScale.w);
+  vec3 n = rot * aNrm;
+  vec3 base = iPosScale.xyz;
+  float sway = iParams.y * aWave;
+  if (sway > 0.0) {
+    float t = uTime * 1.35 + iParams.x + base.x * 0.12 + base.z * 0.09;
+    p.x += (sin(t) + 0.4 * sin(t * 2.3)) * sway;
+    p.z += (cos(t * 0.87) + 0.3 * cos(t * 1.9)) * sway * 0.8;
+  }
+  vW = base + p;
+  vN = n; vC = aCol * iRotTint.yzw; vE = iParams.z;
+  vFade = 1.0 - smoothstep(iParams.w * 0.72, iParams.w, distance(vW.xz, uCam.xz));
+  gl_Position = uVP * vec4(vW, 1.0);
+}`, HEAD + SKY_LIB + `
+in vec3 vN, vC, vW;
+in float vE, vFade;
+out vec4 fragColor;
+uniform vec3 uCam;
+void main(){
+  if (vFade < 0.02) discard;
+  vec3 n = normalize(vN);
+  vec3 view = normalize(uCam - vW);
+  vec3 col = shade(n, vC, view);
+  col += vC * vE;
+  fragColor = vec4(applyFog(col, vW, uCam), vFade);
+}`);
+
+/* ------------------------------------- single objects (uModel matrix) --- */
+const progObj = program(HEAD + `
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+layout(location=2) in vec3 aCol;
+layout(location=3) in float aWave;
+uniform mat4 uVP, uModel;
+uniform float uTime, uFlap, uPhase;
+out vec3 vN, vC, vW;
+void main(){
+  vec3 p = aPos;
+  if (uFlap > 0.0) {                 // wing flap: rotate about the body axis
+    float a = sin(uTime * 3.4 + uPhase) * 0.6 * aWave * uFlap;
+    float sgn = sign(p.x);
+    float c = cos(a * sgn), s = sin(a * sgn);
+    p = vec3(p.x * c - p.y * s, p.x * s + p.y * c, p.z);
+  }
+  vec4 wp = uModel * vec4(p, 1.0);
+  vW = wp.xyz;
+  vN = mat3(uModel) * aNrm;
+  vC = aCol;
+  gl_Position = uVP * wp;
+}`, HEAD + SKY_LIB + `
+in vec3 vN, vC, vW;
+out vec4 fragColor;
+uniform vec3 uCam, uTint;
+uniform float uEmissive, uAlpha, uFogged, uUnlit;
+void main(){
+  vec3 n = normalize(vN);
+  vec3 view = normalize(uCam - vW);
+  vec3 albedo = vC * uTint;
+  vec3 col;
+  if (uUnlit > 0.5) {
+    // Holograms and energy effects: pure colour, brightened at grazing angles,
+    // so additive blending never washes them out to white.
+    float rim = pow(1.0 - clamp(abs(dot(n, view)), 0.0, 1.0), 2.0);
+    col = albedo * uEmissive * (0.70 + rim * 0.85);
+  } else {
+    col = shade(n, albedo, view) + albedo * uEmissive;
+    if (uFogged > 0.5) col = applyFog(col, vW, uCam);
+  }
+  fragColor = vec4(col, uAlpha);
+}`);
+
+/* ------------------------------------------------------------- water --- */
+const progWater = program(HEAD + `
+layout(location=0) in vec3 aPos;
+uniform mat4 uVP;
+uniform vec3 uCam;
+uniform float uTime, uLevel;
+out vec3 vW, vN;
+void main(){
+  vec3 p = vec3(aPos.x + uCam.x, uLevel, aPos.z + uCam.z);
+  float t = uTime;
+  float h = sin(p.x * 0.09 + t * 0.9) * 0.28 + sin(p.z * 0.13 - t * 1.1) * 0.22
+          + sin((p.x + p.z) * 0.045 + t * 0.55) * 0.35;
+  float dx = cos(p.x * 0.09 + t * 0.9) * 0.09 * 0.28 + cos((p.x + p.z) * 0.045 + t * 0.55) * 0.045 * 0.35;
+  float dz = cos(p.z * 0.13 - t * 1.1) * 0.13 * 0.22 + cos((p.x + p.z) * 0.045 + t * 0.55) * 0.045 * 0.35;
+  p.y += h;
+  vW = p;
+  vN = normalize(vec3(-dx, 1.0, -dz));
+  gl_Position = uVP * vec4(p, 1.0);
+}`, HEAD + SKY_LIB + `
+in vec3 vW, vN;
+out vec4 fragColor;
+uniform vec3 uCam, uDeep, uShallow;
+void main(){
+  vec3 n = normalize(vN);
+  vec3 view = normalize(uCam - vW);
+  float fres = pow(1.0 - clamp(dot(n, view), 0.0, 1.0), 3.5);
+  vec3 refl = skyBase(normalize(reflect(-view, n)));
+  vec3 body = mix(uDeep, uShallow, clamp(n.y * 0.5, 0.0, 1.0));
+  vec3 col = mix(body, refl, clamp(fres * 1.2 + 0.08, 0.0, 1.0));
+  vec3 hv = normalize(uSunDir + view);
+  col += uSunCol * pow(clamp(dot(n, hv), 0.0, 1.0), 220.0) * 2.2;
+  col = applyFog(col, vW, uCam);
+  fragColor = vec4(col, 0.90);
+}`);
+
+/* --------------------------------------------------------- particles --- */
+const progPts = program(HEAD + `
+layout(location=0) in vec3 aPos;
+layout(location=2) in vec3 aCol;
+layout(location=3) in float aSize;
+uniform mat4 uVP, uModel;
+uniform vec3 uCam;
+uniform float uScale, uFade, uFixed;
+out vec3 vC;
+out float vA;
+void main(){
+  vec3 wp = (uModel * vec4(aPos, 1.0)).xyz;
+  float dist = max(distance(wp, uCam), 0.35);
+  // uFixed keeps HUD markers a constant on-screen size at any range.
+  gl_PointSize = clamp(aSize * uScale / mix(dist, 1.0, uFixed), 1.0, 90.0);
+  gl_Position = uVP * vec4(wp, 1.0);
+  vC = aCol;
+  vA = mix(1.0, clamp(1.0 - dist / 120.0, 0.0, 1.0), uFade);
+}`, HEAD + `
+in vec3 vC;
+in float vA;
+out vec4 fragColor;
+uniform float uShape;
+void main(){
+  vec2 d = gl_PointCoord - 0.5;
+  float a;
+  if (uShape > 0.5) {                       // hollow diamond marker
+    float m = abs(d.x) + abs(d.y);
+    a  = smoothstep(0.50, 0.43, m) * smoothstep(0.27, 0.34, m);
+    a += smoothstep(0.13, 0.02, m) * 0.85;
+  } else {
+    a = exp(-dot(d, d) * 11.0);
+  }
+  fragColor = vec4(vC * a, a * vA);
+}`);
+
+/* ---------------------------------------------------------------- ui ---- */
+const progUI = program(HEAD + `
+layout(location=0) in vec3 aPos;
+uniform mat4 uVP, uModel;
+out vec2 vUV;
+void main(){
+  vUV = vec2(aPos.x + 0.5, 0.5 - aPos.y);
+  gl_Position = uVP * uModel * vec4(aPos, 1.0);
+}`, HEAD + `
+in vec2 vUV;
+out vec4 fragColor;
+uniform sampler2D uTex;
+uniform float uAlpha;
+void main(){
+  vec4 t = texture(uTex, vUV);
+  fragColor = vec4(t.rgb, t.a * uAlpha);
+}`);
+
+/* -------------------------------------------------------- mesh utils --- */
+function makeMesh(d) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const n = d.pos.length / 3;
+  const buf = new Float32Array(n * 10);
+  for (let i = 0; i < n; i++) {
+    buf[i * 10 + 0] = d.pos[i * 3]; buf[i * 10 + 1] = d.pos[i * 3 + 1]; buf[i * 10 + 2] = d.pos[i * 3 + 2];
+    buf[i * 10 + 3] = d.nrm[i * 3]; buf[i * 10 + 4] = d.nrm[i * 3 + 1]; buf[i * 10 + 5] = d.nrm[i * 3 + 2];
+    buf[i * 10 + 6] = d.col[i * 3]; buf[i * 10 + 7] = d.col[i * 3 + 1]; buf[i * 10 + 8] = d.col[i * 3 + 2];
+    buf[i * 10 + 9] = d.wav ? d.wav[i] : 0;
+  }
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, buf, gl.STATIC_DRAW);
+  const S = 40;
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, S, 0);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, S, 12);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, S, 24);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, S, 36);
+  const ib = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(d.idx), gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  return { vao, count: d.idx.length, vb, ib };
+}
+function disposeMesh(m) {
+  if (!m) return;
+  gl.deleteVertexArray(m.vao);
+  gl.deleteBuffer(m.vb); gl.deleteBuffer(m.ib);
+  if (m.ibuf) gl.deleteBuffer(m.ibuf);
+}
+
+// A mesh plus a per-instance stream (3 x vec4, locations 4/5/6).
+function makeInstanced(meshData) {
+  const m = makeMesh(meshData);
+  const ib = gl.createBuffer();
+  gl.bindVertexArray(m.vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, ib);
+  for (let i = 0; i < 3; i++) {
+    gl.enableVertexAttribArray(4 + i);
+    gl.vertexAttribPointer(4 + i, 4, gl.FLOAT, false, 48, i * 16);
+    gl.vertexAttribDivisor(4 + i, 1);
+  }
+  gl.bindVertexArray(null);
+  return { ...m, ibuf: ib, instances: 0 };
+}
+function uploadInstances(im, data, count) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, im.ibuf);
+  gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, count * 12), gl.DYNAMIC_DRAW);
+  im.instances = count;
+}
+function drawMesh(m) { gl.bindVertexArray(m.vao); gl.drawElements(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0); }
+function drawInstanced(m) {
+  if (!m.instances) return;
+  gl.bindVertexArray(m.vao);
+  gl.drawElementsInstanced(gl.TRIANGLES, m.count, gl.UNSIGNED_SHORT, 0, m.instances);
+}
+/* ================================================== procedural meshes === */
+const G = () => ({ pos: [], nrm: [], col: [], wav: [], idx: [] });
+
+// Local transform builder: translate, Euler XYZ rotate, scale.
+function trs(t, r, s) {
+  const [rx, ry, rz] = r, [sx, sy, sz] = s;
+  const cx = Math.cos(rx), sxr = Math.sin(rx), cy = Math.cos(ry), syr = Math.sin(ry),
+        cz = Math.cos(rz), szr = Math.sin(rz);
+  // R = Ry * Rx * Rz  (yaw, then pitch, then roll)
+  const m = new Float32Array(16);
+  const r00 = cy * cz + syr * sxr * szr, r01 = -cy * szr + syr * sxr * cz, r02 = syr * cx;
+  const r10 = cx * szr,                  r11 = cx * cz,                    r12 = -sxr;
+  const r20 = -syr * cz + cy * sxr * szr, r21 = syr * szr + cy * sxr * cz, r22 = cy * cx;
+  m[0] = r00 * sx; m[1] = r10 * sx; m[2] = r20 * sx; m[3] = 0;
+  m[4] = r01 * sy; m[5] = r11 * sy; m[6] = r21 * sy; m[7] = 0;
+  m[8] = r02 * sz; m[9] = r12 * sz; m[10] = r22 * sz; m[11] = 0;
+  m[12] = t[0]; m[13] = t[1]; m[14] = t[2]; m[15] = 1;
+  return m;
+}
+
+// Append a primitive into a mesh, transformed and coloured.
+function add(dst, src, mat, col, wave) {
+  const base = dst.pos.length / 3;
+  const n = src.pos.length / 3;
+  for (let i = 0; i < n; i++) {
+    const p = [src.pos[i * 3], src.pos[i * 3 + 1], src.pos[i * 3 + 2]];
+    const q = M4.xform(mat, p);
+    dst.pos.push(q[0], q[1], q[2]);
+    const nr = V3.norm(M4.xformDir(mat, [src.nrm[i * 3], src.nrm[i * 3 + 1], src.nrm[i * 3 + 2]]));
+    dst.nrm.push(nr[0], nr[1], nr[2]);
+    const c = typeof col === 'function' ? col(p, q) : col;
+    dst.col.push(c[0], c[1], c[2]);
+    dst.wav.push(typeof wave === 'function' ? wave(p, q) : (wave || 0));
+  }
+  for (let i = 0; i < src.idx.length; i++) dst.idx.push(base + src.idx[i]);
+  return dst;
+}
+
+// Rebuild with per-face normals for a faceted, low-poly look.
+function faceted(m) {
+  const out = G();
+  for (let i = 0; i < m.idx.length; i += 3) {
+    const a = m.idx[i], b = m.idx[i + 1], c = m.idx[i + 2];
+    const pa = [m.pos[a * 3], m.pos[a * 3 + 1], m.pos[a * 3 + 2]];
+    const pb = [m.pos[b * 3], m.pos[b * 3 + 1], m.pos[b * 3 + 2]];
+    const pc = [m.pos[c * 3], m.pos[c * 3 + 1], m.pos[c * 3 + 2]];
+    const n = V3.norm(V3.cross(V3.sub(pb, pa), V3.sub(pc, pa)));
+    for (const v of [a, b, c]) {
+      out.pos.push(m.pos[v * 3], m.pos[v * 3 + 1], m.pos[v * 3 + 2]);
+      out.nrm.push(n[0], n[1], n[2]);
+      out.col.push(m.col[v * 3], m.col[v * 3 + 1], m.col[v * 3 + 2]);
+      out.wav.push(m.wav[v]);
+    }
+    const k = out.pos.length / 3 - 3;
+    out.idx.push(k, k + 1, k + 2);
+  }
+  return out;
+}
+
+const prim = {
+  box(w, h, d) {
+    const x = w / 2, z = d / 2, g = { pos: [], nrm: [], idx: [] };
+    const faces = [
+      [[-x, 0, z], [x, 0, z], [x, h, z], [-x, h, z], [0, 0, 1]],
+      [[x, 0, -z], [-x, 0, -z], [-x, h, -z], [x, h, -z], [0, 0, -1]],
+      [[x, 0, z], [x, 0, -z], [x, h, -z], [x, h, z], [1, 0, 0]],
+      [[-x, 0, -z], [-x, 0, z], [-x, h, z], [-x, h, -z], [-1, 0, 0]],
+      [[-x, h, z], [x, h, z], [x, h, -z], [-x, h, -z], [0, 1, 0]],
+      [[-x, 0, -z], [x, 0, -z], [x, 0, z], [-x, 0, z], [0, -1, 0]],
+    ];
+    for (const f of faces) {
+      const b = g.pos.length / 3;
+      for (let i = 0; i < 4; i++) { g.pos.push(...f[i]); g.nrm.push(...f[4]); }
+      g.idx.push(b, b + 1, b + 2, b, b + 2, b + 3);
+    }
+    return g;
+  },
+  // Tapered tube from y=0 (r0) to y=h (r1).
+  cyl(r0, r1, h, seg, capTop = true, capBot = true) {
+    const g = { pos: [], nrm: [], idx: [] };
+    for (let i = 0; i <= seg; i++) {
+      const a = i / seg * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+      const slope = (r0 - r1) / Math.max(h, 1e-3);
+      const n = V3.norm([c, slope, s]);
+      g.pos.push(c * r0, 0, s * r0); g.nrm.push(...n);
+      g.pos.push(c * r1, h, s * r1); g.nrm.push(...n);
+    }
+    for (let i = 0; i < seg; i++) {
+      const a = i * 2;
+      g.idx.push(a, a + 2, a + 3, a, a + 3, a + 1);
+    }
+    const cap = (y, r, ny) => {
+      if (r <= 1e-4) return;
+      const c0 = g.pos.length / 3;
+      g.pos.push(0, y, 0); g.nrm.push(0, ny, 0);
+      for (let i = 0; i <= seg; i++) {
+        const a = i / seg * Math.PI * 2;
+        g.pos.push(Math.cos(a) * r, y, Math.sin(a) * r); g.nrm.push(0, ny, 0);
+      }
+      for (let i = 0; i < seg; i++) {
+        if (ny > 0) g.idx.push(c0, c0 + 1 + i, c0 + 2 + i);
+        else g.idx.push(c0, c0 + 2 + i, c0 + 1 + i);
+      }
+    };
+    if (capTop) cap(h, r1, 1);
+    if (capBot) cap(0, r0, -1);
+    return g;
+  },
+  // Sphere centred at origin; `warp(dir)` optionally perturbs the radius.
+  sphere(r, su, sv, warp) {
+    const g = { pos: [], nrm: [], idx: [] };
+    for (let j = 0; j <= sv; j++) {
+      const v = j / sv * Math.PI;
+      for (let i = 0; i <= su; i++) {
+        const u = i / su * Math.PI * 2;
+        const d = [Math.sin(v) * Math.cos(u), Math.cos(v), Math.sin(v) * Math.sin(u)];
+        const rr = r * (warp ? warp(d) : 1);
+        g.pos.push(d[0] * rr, d[1] * rr, d[2] * rr);
+        g.nrm.push(d[0], d[1], d[2]);
+      }
+    }
+    for (let j = 0; j < sv; j++) for (let i = 0; i < su; i++) {
+      const a = j * (su + 1) + i, b = a + su + 1;
+      g.idx.push(a, b, b + 1, a, b + 1, a + 1);
+    }
+    return g;
+  },
+  // Vertical blade: base width w, tip width w*taper, height h, facing +Z.
+  blade(w, h, taper, bend) {
+    const g = { pos: [], nrm: [], idx: [] }, steps = 3;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, hw = w * lerp(1, taper, t) * 0.5;
+      const z = bend * t * t;
+      g.pos.push(-hw, h * t, z, hw, h * t, z);
+      g.nrm.push(0, 0.25, 1, 0, 0.25, 1);
+    }
+    for (let i = 0; i < steps; i++) {
+      const a = i * 2;
+      g.idx.push(a, a + 1, a + 3, a, a + 3, a + 2); // rendered with culling off
+    }
+    return g;
+  },
+  quad(w, h) {
+    return {
+      pos: [-w / 2, -h / 2, 0, w / 2, -h / 2, 0, w / 2, h / 2, 0, -w / 2, h / 2, 0],
+      nrm: [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1],
+      idx: [0, 1, 2, 0, 2, 3],
+    };
+  },
+};
+
+const mix3 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+const jitCol = (c, rng, k) => [
+  clamp(c[0] * (1 + (rng() - 0.5) * k), 0, 2),
+  clamp(c[1] * (1 + (rng() - 0.5) * k), 0, 2),
+  clamp(c[2] * (1 + (rng() - 0.5) * k), 0, 2)];
+
+/* --- flora & terrain props ------------------------------------------- */
+function meshRock(rng, col) {
+  const ph = [rng() * 9, rng() * 9, rng() * 9];
+  const warp = d => 1 + 0.30 * Math.sin(d[0] * 3.1 + ph[0]) * Math.sin(d[1] * 2.4 + ph[1])
+                       + 0.18 * Math.sin(d[2] * 4.7 + ph[2]);
+  const m = G();
+  add(m, prim.sphere(1, 7, 5, warp), trs([0, 0.55, 0], [0, rng() * 6.3, 0], [1, 0.85, 1]), p => jitCol(col, rng, 0.18));
+  if (rng() < 0.5) add(m, prim.sphere(0.55, 6, 4, warp), trs([0.7, 0.3, 0.4], [0, rng() * 6, 0], [1, 0.8, 1]), jitCol(col, rng, 0.2));
+  return faceted(m);
+}
+
+function meshCrystal(rng, col) {
+  const m = G();
+  const shard = (x, z, h, r, tilt) => {
+    const g = { pos: [], nrm: [], idx: [] }, n = 5;
+    for (let i = 0; i < n; i++) {
+      const a = i / n * Math.PI * 2, a2 = (i + 1) / n * Math.PI * 2;
+      const p1 = [Math.cos(a) * r, h * 0.28, Math.sin(a) * r];
+      const p2 = [Math.cos(a2) * r, h * 0.28, Math.sin(a2) * r];
+      const b = g.pos.length / 3;
+      g.pos.push(0, 0, 0, ...p1, ...p2, 0, h, 0);
+      for (let k = 0; k < 4; k++) g.nrm.push(0, 1, 0);
+      g.idx.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+    }
+    add(m, g, trs([x, 0, z], [tilt * 0.6, rng() * 6.3, tilt], [1, 1, 1]),
+        p => mix3(col, [1, 1, 1], clamp(p[1] / h, 0, 1) * 0.55));
+  };
+  shard(0, 0, 1, 0.22, (rng() - 0.5) * 0.35);
+  const extra = 1 + (rng() * 3 | 0);
+  for (let i = 0; i < extra; i++) {
+    const a = rng() * 6.3, d = 0.15 + rng() * 0.22;
+    shard(Math.cos(a) * d, Math.sin(a) * d, 0.35 + rng() * 0.5, 0.10 + rng() * 0.07, (rng() - 0.5) * 0.7);
+  }
+  return faceted(m);
+}
+
+function meshTree(rng, trunkCol, leafCol, style) {
+  const m = G();
+  const h = 3.2 + rng() * 2.4;
+  const lean = (rng() - 0.5) * 0.22;
+  const segs = 5;
+  let x = 0, z = 0, y = 0, r = 0.20 + rng() * 0.10;
+  for (let i = 0; i < segs; i++) {
+    const sh = h / segs, r2 = r * 0.76;
+    add(m, prim.cyl(r, r2, sh, 6, false, false),
+        trs([x, y, z], [lean * 0.5, 0, lean], [1, 1, 1]), trunkCol, p => 0.10 * (y + p[1]) / h);
+    x += lean * sh * 0.8; z += lean * sh * 0.5; y += sh; r = r2;
+  }
+  const top = [x, y, z];
+  if (style === 0) {                                  // drooping palm fronds
+    const n = 6 + (rng() * 4 | 0);
+    for (let i = 0; i < n; i++) {
+      const a = i / n * Math.PI * 2 + rng() * 0.4;
+      const len = 1.8 + rng() * 1.3;
+      add(m, prim.blade(0.75, len, 0.12, -len * 0.55),
+          trs(top, [-1.05 - rng() * 0.35, a, 0], [1, 1, 1]),
+          p => mix3(leafCol, [leafCol[0] * 1.5, leafCol[1] * 1.3, leafCol[2] * 1.4], clamp(p[1] / len, 0, 1)),
+          p => 0.10 + 0.5 * clamp(p[1] / len, 0, 1));
+    }
+  } else if (style === 1) {                           // stacked canopy discs
+    for (let i = 0; i < 3; i++) {
+      const t = i / 3;
+      add(m, prim.sphere(1, 8, 5, d => 1 + 0.15 * Math.sin(d[0] * 5 + i) * Math.sin(d[2] * 4)),
+          trs([top[0], top[1] - 0.2 + i * 0.75, top[2]], [0, rng() * 6, 0], [1.6 - t * 0.5, 0.42, 1.6 - t * 0.5]),
+          p => mix3(leafCol, [1, 1, 1], t * 0.22), 0.16);
+    }
+  } else {                                            // bulbous alien pod-tree
+    add(m, prim.sphere(1, 9, 6, d => 1 + 0.22 * Math.sin(d[1] * 6.0) * Math.sin(d[0] * 3.0)),
+        trs([top[0], top[1] + 0.6, top[2]], [0, rng() * 6, 0], [1.35, 1.7, 1.35]), leafCol, 0.14);
+    const n = 5 + (rng() * 4 | 0);
+    for (let i = 0; i < n; i++) {
+      const a = i / n * Math.PI * 2;
+      add(m, prim.blade(0.5, 1.5 + rng(), 0.3, -0.9),
+          trs([top[0] + Math.cos(a) * 0.9, top[1] + 1.4, top[2] + Math.sin(a) * 0.9], [-0.5, a, 0], [1, 1, 1]),
+          mix3(leafCol, [1, 1, 1], 0.3), p => 0.3 + p[1] * 0.3);
+    }
+  }
+  return m;
+}
+
+function meshPod(rng, stalkCol, capCol) {
+  const m = G();
+  const h = 0.5 + rng() * 0.9;
+  add(m, prim.cyl(0.075, 0.05, h, 6, false, false), trs([0, 0, 0], [0, 0, 0], [1, 1, 1]), stalkCol, p => p[1] / h * 0.35);
+  add(m, prim.sphere(1, 9, 6), trs([0, h, 0], [0, rng() * 6, 0], [0.34, 0.28, 0.34]), capCol, 0.35);
+  for (let i = 0; i < 3; i++) {
+    const a = rng() * 6.3;
+    add(m, prim.sphere(1, 5, 4), trs([Math.cos(a) * 0.2, h + 0.16, Math.sin(a) * 0.2], [0, 0, 0], [0.055, 0.055, 0.055]),
+        [1.6, 1.6, 1.6], 0.35);
+  }
+  return m;
+}
+
+function meshGrass(rng, col) {
+  const m = G();
+  const n = 4 + (rng() * 3 | 0);
+  for (let i = 0; i < n; i++) {
+    const a = rng() * Math.PI * 2, d = rng() * 0.13, h = 0.35 + rng() * 0.5;
+    add(m, prim.blade(0.10, h, 0.05, (rng() - 0.5) * 0.5),
+        trs([Math.cos(a) * d, 0, Math.sin(a) * d], [0.1, a, (rng() - 0.5) * 0.3], [1, 1, 1]),
+        p => mix3([col[0] * 0.55, col[1] * 0.55, col[2] * 0.55], col, clamp(p[1] / h, 0, 1)),
+        p => clamp(p[1] / h, 0, 1) ** 1.6);
+  }
+  return m;
+}
+
+/* --- creatures, tools, hands ----------------------------------------- */
+function meshBird(rng, col) {
+  const m = G();
+  const body = [col[0], col[1], col[2]];
+  add(m, prim.sphere(1, 8, 6), trs([0, 0, 0], [0, 0, 0], [0.22, 0.20, 0.62]), body, 0);
+  add(m, prim.sphere(1, 6, 5), trs([0, 0.06, 0.55], [0, 0, 0], [0.15, 0.14, 0.20]), mix3(body, [1, 1, 1], 0.3), 0);
+  for (const s of [-1, 1]) {
+    add(m, prim.blade(1.55, 1.15, 0.35, -0.2),
+        trs([s * 0.14, 0.05, 0.05], [Math.PI / 2, 0, s * Math.PI / 2], [1, 1, 1]),
+        p => mix3(body, [1, 1, 1], clamp(p[1], 0, 1) * 0.45),
+        p => clamp(p[1] / 1.15, 0, 1));
+  }
+  add(m, prim.blade(0.5, 0.6, 0.2, 0), trs([0, 0.02, -0.55], [Math.PI / 2 - 0.25, 0, 0], [1, 1, 1]), body, 0);
+  return faceted(m);
+}
+
+function meshCritter(rng, col) {
+  const m = G();
+  add(m, prim.sphere(1, 8, 6, d => 1 + 0.12 * Math.sin(d[2] * 4)), trs([0, 0.42, 0], [0, 0, 0], [0.34, 0.30, 0.52]), col, 0);
+  add(m, prim.sphere(1, 7, 5), trs([0, 0.60, 0.42], [0, 0, 0], [0.22, 0.21, 0.24]), mix3(col, [1, 1, 1], 0.25), 0);
+  for (const s of [-1, 1]) {
+    add(m, prim.sphere(1, 5, 4), trs([s * 0.10, 0.74, 0.50], [0, 0, 0], [0.05, 0.05, 0.05]), [0.05, 0.05, 0.08], 0);
+    add(m, prim.cyl(0.055, 0.04, 0.30, 5), trs([s * 0.16, 0.44, 0.10], [Math.PI, 0, s * 0.08], [1, 1, 1]), mix3(col, [0, 0, 0], 0.25), 0);
+    add(m, prim.cyl(0.055, 0.04, 0.34, 5), trs([s * 0.17, 0.44, -0.26], [Math.PI, 0, s * -0.08], [1, 1, 1]), mix3(col, [0, 0, 0], 0.25), 0);
+  }
+  add(m, prim.cyl(0.07, 0.01, 0.5, 5), trs([0, 0.5, -0.48], [-2.2, 0, 0], [1, 1, 1]), mix3(col, [1, 1, 1], 0.2), 0);
+  return faceted(m);
+}
+
+function meshTool() {
+  const m = G();
+  const dark = [0.16, 0.17, 0.20], metal = [0.55, 0.58, 0.64], accent = [0.95, 0.52, 0.16];
+  add(m, prim.box(0.075, 0.10, 0.34), trs([0, -0.05, 0.02], [0, 0, 0], [1, 1, 1]), dark);
+  add(m, prim.box(0.055, 0.12, 0.09), trs([0, -0.16, -0.06], [0.30, 0, 0], [1, 1, 1]), dark);
+  add(m, prim.cyl(0.035, 0.022, 0.30, 8), trs([0, 0.02, 0.16], [Math.PI / 2, 0, 0], [1, 1, 1]), metal);
+  add(m, prim.cyl(0.048, 0.048, 0.05, 8), trs([0, 0.02, 0.30], [Math.PI / 2, 0, 0], [1, 1, 1]), accent);
+  add(m, prim.box(0.02, 0.05, 0.11), trs([0.045, 0.02, 0.02], [0, 0, 0], [1, 1, 1]), accent);
+  add(m, prim.box(0.02, 0.05, 0.11), trs([-0.045, 0.02, 0.02], [0, 0, 0], [1, 1, 1]), accent);
+  return faceted(m);
+}
+
+function meshHand() {
+  const m = G();
+  add(m, prim.sphere(1, 8, 6), trs([0, 0, 0], [0, 0, 0], [0.035, 0.035, 0.055]), [0.20, 0.22, 0.28]);
+  add(m, prim.cyl(0.026, 0.020, 0.09, 8), trs([0, 0, 0.01], [Math.PI / 2, 0, 0], [1, 1, 1]), [0.30, 0.33, 0.40]);
+  add(m, prim.cyl(0.040, 0.040, 0.008, 12), trs([0, 0.03, -0.02], [0, 0, 0], [1, 1, 1]), [0.45, 0.75, 0.95]);
+  return faceted(m);
+}
+
+function meshBeam() {   // unit tube along +Z, radius 1, length 1
+  const m = G();
+  add(m, prim.cyl(1, 1, 1, 8, false, false), trs([0, 0, 0], [Math.PI / 2, 0, 0], [1, 1, 1]), [1, 1, 1]);
+  return m;
+}
+
+function meshSphereUnit(col) { return add(G(), prim.sphere(1, 12, 9), trs([0, 0, 0], [0, 0, 0], [1, 1, 1]), col); }
+/* ================================================ procedural planetology === */
+function hsv(h, s, v) {
+  h = (h % 1 + 1) % 1;
+  const i = Math.floor(h * 6), f = h * 6 - i;
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  switch (i % 6) {
+    case 0: return [v, t, p]; case 1: return [q, v, p]; case 2: return [p, v, t];
+    case 3: return [p, q, v]; case 4: return [t, p, v]; default: return [v, p, q];
+  }
+}
+
+const SYL_A = ['ka','zi','no','ur','ve','ax','ly','tor','pha','qui','mor','sel','dra','yn','oth','ba','ri','xe','hul','nem'];
+const SYL_B = ['th','sk','rr','nn','lv','x','mn','gg','st','vv'];
+const SUFFIX = ['Prime','Major','Minor','II','III','IV','IX','XII','XVII','Alpha','Beta','Nova','Rex','Ultima'];
+function planetName(rnd) {
+  let s = '';
+  const parts = 2 + (rnd() * 2 | 0);
+  for (let i = 0; i < parts; i++) {
+    s += SYL_A[(rnd() * SYL_A.length) | 0];
+    if (rnd() < 0.28) s += SYL_B[(rnd() * SYL_B.length) | 0];
+  }
+  s = s[0].toUpperCase() + s.slice(1);
+  return rnd() < 0.65 ? s + ' ' + SUFFIX[(rnd() * SUFFIX.length) | 0] : s;
+}
+
+// Planet archetypes: hue bands, relief, weather and the flavour text.
+const ARCH = [
+  { id: 'Lush',     ground: [.22, .42], rock: [.06, .12], sky: [.50, .62], fog: 0.0022, mtn: 0.75, water: 1, cloud: .75, stars: .25, flora: 1.35, haz: 'None detected', hazv: 'Temperate 24 °C' },
+  { id: 'Desert',   ground: [.07, .13], rock: [.03, .09], sky: [.53, .60], fog: 0.0028, mtn: 0.55, water: 0, cloud: .25, stars: .30, flora: 0.35, haz: 'Extreme heat',   hazv: 'Scorching 61 °C' },
+  { id: 'Frozen',   ground: [.55, .60], rock: [.58, .64], sky: [.55, .66], fog: 0.0035, mtn: 1.10, water: 1, cloud: .85, stars: .35, flora: 0.30, haz: 'Frost storms',   hazv: 'Frozen −54 °C' },
+  { id: 'Toxic',    ground: [.24, .34], rock: [.30, .40], sky: [.20, .30], fog: 0.0042, mtn: 0.65, water: 1, cloud: .90, stars: .20, flora: 1.15, haz: 'Toxic spores',   hazv: 'Caustic 33 °C' },
+  { id: 'Scorched', ground: [.98, .05], rock: [.95, .02], sky: [.02, .09], fog: 0.0038, mtn: 1.25, water: 0, cloud: .45, stars: .40, flora: 0.30, haz: 'Firestorms',     hazv: 'Molten 88 °C' },
+  { id: 'Barren',   ground: [.10, .70], rock: [.62, .68], sky: [.60, .72], fog: 0.0016, mtn: 0.95, water: 0, cloud: .10, stars: .95, flora: 0.12, haz: 'Vacuum-thin air', hazv: 'Airless −18 °C' },
+  { id: 'Exotic',   ground: [.78, .88], rock: [.72, .84], sky: [.74, .88], fog: 0.0030, mtn: 1.00, water: 1, cloud: .55, stars: .55, flora: 1.55, haz: 'Anomalous field', hazv: 'Unstable 12 °C' },
+];
+
+const RESOURCES = {
+  ferrite: { label: 'Ferrite Dust', col: [0.72, 0.45, 0.28] },
+  carbon:  { label: 'Carbon',       col: [0.35, 0.85, 0.55] },
+  sodium:  { label: 'Sodium',       col: [0.95, 0.75, 0.25] },
+  cobalt:  { label: 'Cobalt',       col: [0.35, 0.60, 1.00] },
+  emeril:  { label: 'Emeril',       col: [0.55, 1.00, 0.80] },
+};
+
+function makePlanet(seed) {
+  const rnd = mulberry32(seed);
+  const nz = makeNoise(seed ^ 0x5bf03635);
+  const arch = ARCH[(rnd() * ARCH.length) | 0];
+
+  const gHue = lerp(arch.ground[0], arch.ground[1], rnd());
+  const rHue = lerp(arch.rock[0], arch.rock[1], rnd());
+  const sHue = lerp(arch.sky[0], arch.sky[1], rnd());
+
+  const P = {
+    seed, arch, name: planetName(rnd),
+    grass:  hsv(gHue, 0.42 + rnd() * 0.35, 0.42 + rnd() * 0.30),
+    grass2: hsv(gHue + (rnd() - 0.5) * 0.22, 0.50 + rnd() * 0.30, 0.38 + rnd() * 0.34),
+    rock:   hsv(rHue, 0.16 + rnd() * 0.28, 0.34 + rnd() * 0.30),
+    sand:   hsv(gHue + 0.06, 0.28 + rnd() * 0.25, 0.55 + rnd() * 0.28),
+    peak:   hsv(rHue + 0.03, 0.05 + rnd() * 0.15, 0.78 + rnd() * 0.20),
+    flora:  hsv((gHue + 0.45 + rnd() * 0.3) % 1, 0.60 + rnd() * 0.35, 0.55 + rnd() * 0.40),
+    flora2: hsv((gHue + 0.62 + rnd() * 0.3) % 1, 0.65 + rnd() * 0.30, 0.60 + rnd() * 0.35),
+    glow:   hsv(rnd(), 0.55 + rnd() * 0.4, 0.95),
+    zenith: hsv(sHue, 0.52 + rnd() * 0.35, 0.30 + rnd() * 0.35),
+    horizon: hsv(sHue + (rnd() - 0.5) * 0.18, 0.42 + rnd() * 0.4, 0.62 + rnd() * 0.35),
+    sunCol: hsv((sHue + 0.5 + (rnd() - 0.5) * 0.2) % 1, 0.12 + rnd() * 0.42, 1.0),
+    nebula: hsv(rnd(), 0.55, 0.10 + rnd() * 0.16),
+    fog: arch.fog * (0.7 + rnd() * 0.7),
+    cloud: arch.cloud * (0.6 + rnd() * 0.7),
+    stars: arch.stars * (0.7 + rnd() * 0.6),
+    gravity: 6.5 + rnd() * 8.0,
+    treeStyle: (rnd() * 3) | 0,
+    rnd,
+  };
+  // When ground and sky land on the same hue the horizon disappears, so
+  // darken the surface until it reads as solid against the sky.
+  const hueGap = Math.abs(((gHue - sHue) % 1 + 1.5) % 1 - 0.5);
+  if (hueGap < 0.15) {
+    for (const k of ['grass', 'grass2', 'sand', 'rock', 'peak']) P[k] = P[k].map(v => v * 0.70);
+  }
+  P.ground = [P.rock[0] * 0.35, P.rock[1] * 0.35, P.rock[2] * 0.40];
+
+  // Sun somewhere between low golden light and high noon.
+  const sunA = rnd() * Math.PI * 2, sunE = 0.12 + rnd() * 0.62;
+  P.sunDir = V3.norm([Math.cos(sunA) * Math.cos(sunE), Math.sin(sunE), Math.sin(sunA) * Math.cos(sunE)]);
+
+  // Companion worlds in the sky.
+  P.bodies = [];
+  const nb = 1 + (rnd() * 3 | 0);
+  for (let i = 0; i < nb; i++) {
+    const a = rnd() * Math.PI * 2, e = 0.05 + rnd() * 0.75;
+    const rad = 0.03 + rnd() * 0.13;
+    P.bodies.push({
+      dir: V3.norm([Math.cos(a) * Math.cos(e), Math.sin(e), Math.sin(a) * Math.cos(e)]),
+      cosR: Math.cos(rad),
+      col: hsv(rnd(), 0.25 + rnd() * 0.45, 0.55 + rnd() * 0.4),
+      ring: rnd() < 0.35 ? 1 : 0,
+    });
+  }
+
+  // ---- terrain field -------------------------------------------------
+  const contAmp = 26 + rnd() * 40;
+  const mtnAmp = (55 + rnd() * 130) * arch.mtn;
+  const detail = 1.4 + rnd() * 3.2;
+  const warpAmp = 40 + rnd() * 90;
+  const contF = 0.00085 + rnd() * 0.0009;
+  const mtnF = 0.0021 + rnd() * 0.0022;
+  const plateau = rnd() < 0.3;
+
+  P.height = function (x, z) {
+    const wx = x + nz.fbm(x * 0.0016, z * 0.0016, 3, 2.0, 0.5) * warpAmp;
+    const wz = z + nz.fbm(x * 0.0016 + 31.7, z * 0.0016 - 12.3, 3, 2.0, 0.5) * warpAmp;
+    let h = nz.fbm(wx * contF, wz * contF, 4, 2.05, 0.5) * contAmp;
+    const mask = clamp(nz.fbm(x * 0.00055 + 7.7, z * 0.00055 - 3.1, 2, 2.0, 0.5) * 1.7 + 0.45, 0, 1);
+    let r = nz.ridged(wx * mtnF, wz * mtnF, 5, 2.08, 0.52);
+    r = r * r;
+    h += r * mtnAmp * mask;
+    h += nz.fbm(x * 0.016, z * 0.016, 3, 2.1, 0.5) * detail;
+    h += nz.fbm(x * 0.075, z * 0.075, 2, 2.0, 0.5) * detail * 0.28;
+    if (plateau) h = Math.round(h / 9) * 9 * 0.34 + h * 0.66;   // mesa terracing
+    return h;
+  };
+
+  P.waterLevel = arch.water ? -6 + rnd() * 16 : -9999;
+  P.deep = hsv(sHue + 0.5 + (rnd() - 0.5) * 0.2, 0.75, 0.10 + rnd() * 0.12);
+  P.shallow = hsv(sHue + 0.5 + (rnd() - 0.5) * 0.2, 0.55, 0.35 + rnd() * 0.25);
+
+  const snowLine = 55 + rnd() * 90;
+  P.colorAt = function (x, z, h, slope) {
+    const b = clamp(nz.fbm(x * 0.0042, z * 0.0042, 3, 2.0, 0.5) * 1.3 + 0.5, 0, 1);
+    let c = mix3(P.grass, P.grass2, b);
+    const shore = P.waterLevel > -9000 ? clamp((h - P.waterLevel) / 3.5, 0, 1) : 1;
+    c = mix3(P.sand, c, smooth(shore));
+    c = mix3(c, P.rock, smooth(clamp((slope - 0.42) / 0.30, 0, 1)));
+    c = mix3(c, P.peak, smooth(clamp((h - snowLine) / 45, 0, 1)) * 0.9);
+    const grain = nz.fbm(x * 0.09, z * 0.09, 2, 2.0, 0.5) * 0.10;
+    return [clamp(c[0] * (1 + grain), 0, 1), clamp(c[1] * (1 + grain), 0, 1), clamp(c[2] * (1 + grain), 0, 1)];
+  };
+
+  // ---- surface props --------------------------------------------------
+  // `density` is instances attempted per 64 m chunk; `fade` is the draw radius.
+  const fl = arch.flora;
+  P.props = [
+    { key: 'grass',    density: 130 * fl, fade: 44, scale: [0.9, 1.9], emissive: 0,    sway: 0.055, res: 'carbon',  slope: 0.55, minH: 1.0 },
+    { key: 'plant',    density: 15 * fl, fade: 105, scale: [0.6, 1.5], emissive: 0.35, sway: 0.02,  res: 'carbon',  slope: 0.50, minH: 1.2 },
+    { key: 'rock',     density: 10,      fade: 195, scale: [0.5, 2.6], emissive: 0,    sway: 0,     res: 'ferrite', slope: 0.90, minH: 0.4 },
+    { key: 'crystal',  density: 3.5,     fade: 195, scale: [0.6, 2.4], emissive: 0.9,  sway: 0,     res: 'emeril',  slope: 0.70, minH: 0.8 },
+    { key: 'tree',     density: 6 * fl,  fade: 255, scale: [0.7, 1.6], emissive: 0,    sway: 0.03,  res: 'carbon',  slope: 0.40, minH: 2.0 },
+    { key: 'monolith', density: 0.12,    fade: 275, scale: [1.0, 2.2], emissive: 0.5,  sway: 0,     res: 'sodium',  slope: 0.28, minH: 3.0 },
+  ];
+
+  P.buildMeshes = function () {
+    const r = mulberry32(seed ^ 0x1234abcd);
+    const monolith = (() => {
+      const m = G();
+      const dark = mix3(P.rock, [0.05, 0.05, 0.07], 0.55);
+      add(m, prim.box(1.3, 6.5, 0.55), trs([0, 0, 0], [0, 0, 0.03], [1, 1, 1]), dark);
+      add(m, prim.box(2.2, 0.5, 1.1), trs([0, 0, 0], [0, 0, 0], [1, 1, 1]), dark);
+      add(m, prim.box(0.85, 0.16, 0.62), trs([0, 4.4, 0], [0, 0, 0.03], [1, 1, 1]), P.glow);
+      add(m, prim.box(0.5, 0.16, 0.62), trs([0, 3.6, 0], [0, 0, 0.03], [1, 1, 1]), P.glow);
+      add(m, prim.box(0.66, 0.16, 0.62), trs([0, 2.6, 0], [0, 0, 0.03], [1, 1, 1]), P.glow);
+      return faceted(m);
+    })();
+    return {
+      grass:    makeInstanced(meshGrass(r, P.grass2)),
+      plant:    makeInstanced(meshPod(r, P.flora2, P.flora)),
+      rock:     makeInstanced(meshRock(r, P.rock)),
+      crystal:  makeInstanced(meshCrystal(r, P.glow)),
+      tree:     makeInstanced(meshTree(r, mix3(P.rock, P.flora2, 0.35), P.flora, P.treeStyle)),
+      monolith: makeInstanced(monolith),
+    };
+  };
+  return P;
+}
+
+/* ==================================================== world streaming ==== */
+const CHUNK = 64;          // metres per chunk
+const RES = 24;            // quads per chunk edge
+const RING = 4;            // chunks in each direction -> (2R+1)^2 loaded
+const VIEW = CHUNK * RING; // ~256 m of solid geometry, fog closes the rest
+
+function makeMeshRaw(interleaved, indices) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, interleaved, gl.STATIC_DRAW);
+  const S = 40;
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, S, 0);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, S, 12);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, S, 24);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, S, 36);
+  const ib = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  return { vao, count: indices.length, vb, ib };
+}
+
+const TERRAIN_IDX = (() => {
+  const N = RES + 1, idx = new Uint16Array(RES * RES * 6);
+  let k = 0;
+  for (let j = 0; j < RES; j++) for (let i = 0; i < RES; i++) {
+    const a = j * N + i;
+    idx[k++] = a; idx[k++] = a + N; idx[k++] = a + N + 1;
+    idx[k++] = a; idx[k++] = a + N + 1; idx[k++] = a + 1;
+  }
+  return idx;
+})();
+
+const world = {
+  planet: null, chunks: new Map(), meshes: null, dirty: true,
+  center: [0, 0], queue: [], propData: {}, propCount: {},
+};
+
+function chunkKey(cx, cz) { return cx + ',' + cz; }
+
+function buildChunk(cx, cz) {
+  const P = world.planet, N = RES + 1, step = CHUNK / RES;
+  const ox = cx * CHUNK, oz = cz * CHUNK;
+
+  // One padded height grid feeds both the mesh normals and the scatter pass,
+  // so the expensive noise function is evaluated once per sample.
+  const M = N + 2;
+  const hg = new Float32Array(M * M);
+  for (let j = 0; j < M; j++) {
+    const z = oz + (j - 1) * step;
+    for (let i = 0; i < M; i++) hg[j * M + i] = P.height(ox + (i - 1) * step, z);
+  }
+  const H = (i, j) => hg[(j + 1) * M + (i + 1)];
+
+  const buf = new Float32Array(N * N * 10);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const x = ox + i * step, z = oz + j * step;
+      const h = H(i, j);
+      const n = V3.norm([H(i - 1, j) - H(i + 1, j), 2 * step, H(i, j - 1) - H(i, j + 1)]);
+      const c = P.colorAt(x, z, h, 1 - n[1]);
+      const o = (j * N + i) * 10;
+      buf[o] = x; buf[o + 1] = h; buf[o + 2] = z;
+      buf[o + 3] = n[0]; buf[o + 4] = n[1]; buf[o + 5] = n[2];
+      buf[o + 6] = c[0]; buf[o + 7] = c[1]; buf[o + 8] = c[2];
+    }
+  }
+  const mesh = makeMeshRaw(buf, TERRAIN_IDX);
+
+  // Bilinear lookup into the same grid, plus the local gradient.
+  function sample(x, z) {
+    const fx = clamp((x - ox) / step, 0, RES - 0.001), fz = clamp((z - oz) / step, 0, RES - 0.001);
+    const i = fx | 0, j = fz | 0, tx = fx - i, tz = fz - j;
+    const h00 = H(i, j), h10 = H(i + 1, j), h01 = H(i, j + 1), h11 = H(i + 1, j + 1);
+    const h = lerp(lerp(h00, h10, tx), lerp(h01, h11, tx), tz);
+    const gx = (h10 - h00 + h11 - h01) * 0.5 / step;
+    const gz = (h01 - h00 + h11 - h10) * 0.5 / step;
+    return [h, Math.min(1, Math.hypot(gx, gz) * 0.55)];
+  }
+
+  // Scatter props deterministically inside this chunk.
+  const props = {};
+  for (let pi = 0; pi < P.props.length; pi++) {
+    const cfg = P.props[pi];
+    const r = mulberry32((Math.imul(cx, 73856093) ^ Math.imul(cz, 19349663) ^ Math.imul(pi + 1, 83492791) ^ P.seed) >>> 0);
+    let count = Math.floor(cfg.density);
+    if (r() < cfg.density - count) count++;
+    const list = [];
+    for (let s = 0; s < count; s++) {
+      const x = ox + r() * CHUNK, z = oz + r() * CHUNK;
+      const [h, slope] = sample(x, z);
+      if (h < P.waterLevel + cfg.minH) continue;
+      if (slope > cfg.slope) continue;
+      if (r() > 0.35 + 0.65 * (1 - slope / Math.max(cfg.slope, 0.01))) continue;
+      const sc = lerp(cfg.scale[0], cfg.scale[1], r() * r());
+      const tint = 0.75 + r() * 0.55;
+      list.push(x, h - 0.05, z, sc,
+                r() * 6.283, tint, tint * (0.92 + r() * 0.16), tint * (0.92 + r() * 0.16),
+                r() * 6.283, cfg.sway, cfg.emissive * (0.6 + r() * 0.8), cfg.fade);
+    }
+    props[cfg.key] = new Float32Array(list);
+  }
+  return { mesh, props, cx, cz };
+}
+
+function disposeChunk(c) {
+  gl.deleteVertexArray(c.mesh.vao);
+  gl.deleteBuffer(c.mesh.vb);
+  gl.deleteBuffer(c.mesh.ib);
+}
+
+// Only chunks that can actually be seen for a given prop type get uploaded,
+// so short-range props (grass) never pay for the whole streaming ring.
+function rebuildPropBuffers() {
+  const P = world.planet, [ccx, ccz] = world.center;
+  for (const cfg of P.props) {
+    const ring = Math.ceil((cfg.fade + CHUNK) / CHUNK);
+    const near = [];
+    let total = 0;
+    for (const c of world.chunks.values()) {
+      if (Math.abs(c.cx - ccx) > ring || Math.abs(c.cz - ccz) > ring) continue;
+      near.push(c.props[cfg.key]); total += c.props[cfg.key].length;
+    }
+    let arr = world.propData[cfg.key];
+    if (!arr || arr.length < total) arr = world.propData[cfg.key] = new Float32Array(Math.ceil(total * 1.3) + 120);
+    let o = 0;
+    for (const a of near) { arr.set(a, o); o += a.length; }
+    world.propCount[cfg.key] = o / 12;
+    uploadInstances(world.meshes[cfg.key], arr, o / 12);
+  }
+  world.dirty = false;
+}
+
+// Keep the ring of chunks centred on the player; build a couple per frame.
+function updateChunks(px, pz, budget) {
+  const cx = Math.floor(px / CHUNK), cz = Math.floor(pz / CHUNK);
+  if (cx !== world.center[0] || cz !== world.center[1]) {
+    world.center = [cx, cz];
+    world.dirty = true;
+    const want = [];
+    for (let j = -RING; j <= RING; j++) for (let i = -RING; i <= RING; i++) {
+      const d = i * i + j * j;
+      if (d > (RING + 0.5) * (RING + 0.5)) continue;
+      want.push({ x: cx + i, z: cz + j, d });
+    }
+    want.sort((a, b) => a.d - b.d);
+    world.queue = want.filter(w => !world.chunks.has(chunkKey(w.x, w.z)));
+    for (const [k, c] of world.chunks) {
+      const [a, b] = k.split(',').map(Number);
+      if (Math.abs(a - cx) > RING + 1 || Math.abs(b - cz) > RING + 1) {
+        disposeChunk(c); world.chunks.delete(k); world.dirty = true;
+      }
+    }
+  }
+  let made = 0;
+  while (world.queue.length && made < budget) {
+    const w = world.queue.shift();
+    const k = chunkKey(w.x, w.z);
+    if (!world.chunks.has(k)) { world.chunks.set(k, buildChunk(w.x, w.z)); world.dirty = true; made++; }
+  }
+  if (world.dirty && world.queue.length === 0) rebuildPropBuffers();
+  return world.queue.length;
+}
+
+// Water follows the camera; a flat grid displaced in the vertex shader.
+function makeWaterMesh() {
+  const N = 64, S = 900;
+  const buf = new Float32Array(N * N * 10);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const o = (j * N + i) * 10;
+    buf[o] = (i / (N - 1) - 0.5) * S; buf[o + 1] = 0; buf[o + 2] = (j / (N - 1) - 0.5) * S;
+    buf[o + 4] = 1;
+  }
+  const idx = new Uint16Array((N - 1) * (N - 1) * 6);
+  let k = 0;
+  for (let j = 0; j < N - 1; j++) for (let i = 0; i < N - 1; i++) {
+    const a = j * N + i;
+    idx[k++] = a; idx[k++] = a + N; idx[k++] = a + N + 1;
+    idx[k++] = a; idx[k++] = a + N + 1; idx[k++] = a + 1;
+  }
+  return makeMeshRaw(buf, idx);
+}
+
+// Ray/terrain intersection by marching, then a short bisection refine.
+function raycastTerrain(origin, dir, maxDist) {
+  const P = world.planet;
+  let t = 0.2;
+  const step = 0.45;
+  while (t < maxDist) {
+    const x = origin[0] + dir[0] * t, y = origin[1] + dir[1] * t, z = origin[2] + dir[2] * t;
+    const d = y - P.height(x, z);
+    if (d < 0) {
+      let lo = t - step, hi = t;
+      for (let i = 0; i < 8; i++) {
+        const mid = (lo + hi) / 2;
+        const mx = origin[0] + dir[0] * mid, my = origin[1] + dir[1] * mid, mz = origin[2] + dir[2] * mid;
+        if (my - P.height(mx, mz) < 0) hi = mid; else lo = mid;
+      }
+      return [origin[0] + dir[0] * hi, origin[1] + dir[1] * hi, origin[2] + dir[2] * hi];
+    }
+    t += step * (1 + t * 0.05);
+  }
+  return null;
+}
+
+// Which resource does the surface at `p` yield? Nearby props win over soil.
+function resourceAt(p) {
+  const P = world.planet;
+  let best = null, bestD = 3.0;
+  const cx = Math.floor(p[0] / CHUNK), cz = Math.floor(p[2] / CHUNK);
+  for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+    const c = world.chunks.get(chunkKey(cx + i, cz + j));
+    if (!c) continue;
+    for (const cfg of P.props) {
+      if (cfg.key === 'grass') continue;
+      const a = c.props[cfg.key];
+      for (let k = 0; k < a.length; k += 12) {
+        const d = Math.hypot(a[k] - p[0], (a[k + 1] - p[1]) * 0.5, a[k + 2] - p[2]) - a[k + 3] * 0.6;
+        if (d < bestD) { bestD = d; best = cfg.res; }
+      }
+    }
+  }
+  if (best) return best;
+  return p[1] < P.waterLevel + 4 ? 'sodium' : (P.height(p[0], p[2]) > 60 ? 'cobalt' : 'ferrite');
+}
+/* ====================================================== fauna ============ */
+const fauna = { flyers: [], grazers: [], flyerMesh: null, grazerMesh: null };
+
+function spawnFauna(P) {
+  const r = mulberry32(P.seed ^ 0xfa11a);
+  fauna.flyers.length = 0; fauna.grazers.length = 0;
+  const nf = 5 + (r() * 8 | 0);
+  for (let i = 0; i < nf; i++) {
+    fauna.flyers.push({
+      cx: (r() - 0.5) * 160, cz: (r() - 0.5) * 160,
+      rad: 25 + r() * 70, ang: r() * 6.283, spd: (0.10 + r() * 0.22) * (r() < 0.5 ? -1 : 1),
+      alt: 18 + r() * 55, bob: r() * 6.283, scale: 1.1 + r() * 2.6,
+    });
+  }
+  const ng = 3 + (r() * 5 | 0);
+  for (let i = 0; i < ng; i++) {
+    fauna.grazers.push({
+      x: (r() - 0.5) * 90, z: (r() - 0.5) * 90, dir: r() * 6.283,
+      spd: 0.7 + r() * 1.6, t: r() * 10, scale: 0.6 + r() * 1.1, hop: r() * 6.283,
+    });
+  }
+  disposeMesh(fauna.flyerMesh); disposeMesh(fauna.grazerMesh);
+  fauna.flyerMesh = makeMesh(meshBird(r, mix3(P.flora, [1, 1, 1], 0.25)));
+  fauna.grazerMesh = makeMesh(meshCritter(r, mix3(P.flora2, P.grass, 0.4)));
+}
+
+function updateFauna(dt, cam) {
+  const P = world.planet;
+  for (const f of fauna.flyers) {
+    f.ang += f.spd * dt;
+    // Drift the orbit centre so flocks stay in view without teleporting.
+    f.cx += (cam[0] - f.cx) * 0.004;
+    f.cz += (cam[2] - f.cz) * 0.004;
+    const x = f.cx + Math.cos(f.ang) * f.rad, z = f.cz + Math.sin(f.ang) * f.rad;
+    const g = P.height(x, z);
+    const y = Math.max(g + 12, P.waterLevel + 10) + f.alt * 0.6 + Math.sin(t_now * 0.6 + f.bob) * 2.4;
+    f.pos = [x, y, z];
+    f.fwd = [-Math.sin(f.ang) * Math.sign(f.spd), 0.03, Math.cos(f.ang) * Math.sign(f.spd)];
+  }
+  for (const g of fauna.grazers) {
+    g.t -= dt;
+    if (g.t < 0) { g.t = 2 + Math.random() * 5; g.dir += (Math.random() - 0.5) * 2.2; }
+    const moving = g.t > 1.2;
+    if (moving) {
+      g.x += Math.cos(g.dir) * g.spd * dt;
+      g.z += Math.sin(g.dir) * g.spd * dt;
+      g.hop += dt * 7;
+    }
+    const dx = g.x - cam[0], dz = g.z - cam[2];
+    if (dx * dx + dz * dz > 95 * 95) {          // keep the herd nearby
+      const a = Math.random() * 6.283, d = 35 + Math.random() * 30;
+      g.x = cam[0] + Math.cos(a) * d; g.z = cam[2] + Math.sin(a) * d;
+    }
+    const h = P.height(g.x, g.z);
+    g.pos = [g.x, Math.max(h, P.waterLevel) + (moving ? Math.abs(Math.sin(g.hop)) * 0.18 : 0), g.z];
+    g.fwd = [Math.cos(g.dir), 0, Math.sin(g.dir)];
+  }
+}
+
+/* ==================================================== particles ========== */
+const PMAX = 1400;
+const par = {
+  pos: new Float32Array(PMAX * 3), vel: new Float32Array(PMAX * 3),
+  col: new Float32Array(PMAX * 3), life: new Float32Array(PMAX),
+  max: new Float32Array(PMAX), size: new Float32Array(PMAX),
+  kind: new Uint8Array(PMAX), cursor: 0,
+  gpu: new Float32Array(PMAX * 7), mesh: null, count: 0,
+};
+(function initParticleVAO() {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, par.gpu.byteLength, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 28, 12);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 24);
+  gl.bindVertexArray(null);
+  par.mesh = { vao, vb };
+})();
+
+function emit(p, v, col, life, size, kind) {
+  const i = par.cursor = (par.cursor + 1) % PMAX;
+  par.pos[i * 3] = p[0]; par.pos[i * 3 + 1] = p[1]; par.pos[i * 3 + 2] = p[2];
+  par.vel[i * 3] = v[0]; par.vel[i * 3 + 1] = v[1]; par.vel[i * 3 + 2] = v[2];
+  par.col[i * 3] = col[0]; par.col[i * 3 + 1] = col[1]; par.col[i * 3 + 2] = col[2];
+  par.life[i] = life; par.max[i] = life; par.size[i] = size; par.kind[i] = kind;
+}
+
+// kind 0 = spark (gravity, fades)   kind 1 = ambient mote (drifts, recycles)
+function seedMotes(cam, col) {
+  for (let i = 0; i < 260; i++) {
+    const a = Math.random() * 6.283, d = Math.random() * 34;
+    emit([cam[0] + Math.cos(a) * d, cam[1] - 2 + Math.random() * 12, cam[2] + Math.sin(a) * d],
+         [(Math.random() - 0.5) * 0.35, 0.05 + Math.random() * 0.2, (Math.random() - 0.5) * 0.35],
+         col, 1e9, 22 + Math.random() * 26, 1);
+  }
+}
+
+function updateParticles(dt, cam) {
+  let n = 0;
+  for (let i = 0; i < PMAX; i++) {
+    if (par.life[i] <= 0) continue;
+    const o = i * 3;
+    if (par.kind[i] === 0) {
+      par.vel[o + 1] -= 7.5 * dt;
+      par.vel[o] *= 0.985; par.vel[o + 2] *= 0.985;
+      par.life[i] -= dt;
+    } else {
+      par.vel[o] += (Math.random() - 0.5) * dt * 0.6;
+      par.vel[o + 2] += (Math.random() - 0.5) * dt * 0.6;
+      par.vel[o] = clamp(par.vel[o], -0.5, 0.5); par.vel[o + 2] = clamp(par.vel[o + 2], -0.5, 0.5);
+      const dx = par.pos[o] - cam[0], dy = par.pos[o + 1] - cam[1], dz = par.pos[o + 2] - cam[2];
+      if (dx * dx + dz * dz > 40 * 40 || dy > 16 || dy < -6) {
+        const a = Math.random() * 6.283, d = Math.random() * 32;
+        par.pos[o] = cam[0] + Math.cos(a) * d;
+        par.pos[o + 1] = cam[1] - 3 + Math.random() * 12;
+        par.pos[o + 2] = cam[2] + Math.sin(a) * d;
+      }
+    }
+    par.pos[o] += par.vel[o] * dt;
+    par.pos[o + 1] += par.vel[o + 1] * dt;
+    par.pos[o + 2] += par.vel[o + 2] * dt;
+    const f = par.kind[i] === 0 ? clamp(par.life[i] / par.max[i], 0, 1) : 0.55;
+    const g = n * 7;
+    par.gpu[g] = par.pos[o]; par.gpu[g + 1] = par.pos[o + 1]; par.gpu[g + 2] = par.pos[o + 2];
+    par.gpu[g + 3] = par.col[o] * f; par.gpu[g + 4] = par.col[o + 1] * f; par.gpu[g + 5] = par.col[o + 2] * f;
+    par.gpu[g + 6] = par.size[i] * (par.kind[i] === 0 ? 0.4 + f * 0.8 : 1);
+    n++;
+  }
+  par.count = n;
+  if (n) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, par.mesh.vb);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, par.gpu, 0, n * 7);
+  }
+}
+
+/* ========================================================== hud ========== */
+const hud = {
+  canvas: document.createElement('canvas'), tex: null, dirty: true,
+  toast: '', toastT: 0, warpT: 0, scanT: 0,
+  inv: { ferrite: 0, carbon: 0, sodium: 0, cobalt: 0, emeril: 0 },
+  discovered: 0,
+};
+hud.canvas.width = 640; hud.canvas.height = 320;
+hud.ctx = hud.canvas.getContext('2d');
+hud.tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, hud.tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+function rgbCss(c, a) {
+  return `rgba(${Math.round(clamp(c[0], 0, 1) * 255)},${Math.round(clamp(c[1], 0, 1) * 255)},${Math.round(clamp(c[2], 0, 1) * 255)},${a})`;
+}
+
+function drawHud() {
+  const c = hud.ctx, W = hud.canvas.width, H = hud.canvas.height, P = world.planet;
+  const accent = rgbCss(P.glow, 1);
+  c.clearRect(0, 0, W, H);
+  // Glass, not a slab: the world stays visible through the readout.
+  c.fillStyle = 'rgba(6,16,28,0.38)';
+  c.fillRect(0, 0, W, H);
+  for (let sy = 0; sy < H; sy += 4) {          // faint scanlines
+    c.fillStyle = 'rgba(140,215,255,0.030)';
+    c.fillRect(0, sy, W, 1);
+  }
+  c.strokeStyle = rgbCss(P.glow, 0.75); c.lineWidth = 1.5;
+  c.strokeRect(6, 6, W - 12, H - 12);
+  c.fillStyle = rgbCss(P.glow, 0.10);
+  c.fillRect(6, 6, W - 12, 52);
+  c.beginPath(); c.moveTo(6, 58); c.lineTo(W - 6, 58); c.stroke();
+
+  c.fillStyle = accent;
+  c.font = '600 30px Consolas, monospace';
+  c.fillText(P.name.toUpperCase(), 20, 42);
+  c.font = '15px Consolas, monospace';
+  c.fillStyle = 'rgba(190,225,255,0.85)';
+  c.fillText(`${P.arch.id.toUpperCase()}  ·  ${P.arch.hazv}`, 20, 80);
+  c.fillText(`HAZARD: ${P.arch.haz}`, 20, 102);
+  c.fillText(`GRAVITY: ${P.gravity.toFixed(1)} m/s²   SEED: ${(P.seed >>> 0).toString(16).toUpperCase()}`, 20, 124);
+  c.fillText(`DISCOVERIES: ${hud.discovered}`, 20, 146);
+
+  // Warp charge — the resource that gates travel.
+  const ch = clamp(nav.charge / 100, 0, 1);
+  c.fillStyle = 'rgba(255,255,255,0.10)'; c.fillRect(W - 250, 26, 226, 22);
+  c.fillStyle = ch < 0.3 ? 'rgba(255,110,90,0.9)' : rgbCss([0.35, 0.95, 0.85], 0.92);
+  c.fillRect(W - 248, 28, 222 * ch, 18);
+  c.fillStyle = 'rgba(220,245,255,0.95)'; c.font = '600 13px Consolas, monospace';
+  c.fillText('WARP ' + Math.round(nav.charge) + '%', W - 240, 43);
+
+  let y = 182;
+  if (nav.open) {
+    c.font = '600 16px Consolas, monospace';
+    c.fillStyle = 'rgba(150,200,235,0.7)';
+    c.fillText('NAV · ' + NAV_MODES[nav.mode], 20, y - 12);
+    const it = nav.hover >= 0 ? nav.items[nav.hover] : null;
+    c.font = '600 20px Consolas, monospace';
+    c.fillStyle = it ? rgbCss(it.col, 1) : 'rgba(150,190,220,0.45)';
+    c.fillText(it ? it.label : 'point at a target…', 20, y + 18);
+    c.font = '15px Consolas, monospace';
+    c.fillStyle = 'rgba(200,230,255,0.8)';
+    if (it) c.fillText(it.sub, 20, y + 42);
+    if (nav.target) {
+      const tp = getSystem(nav.target.star).planets[nav.target.planet];
+      const cost = nav.target.star === nav.curStar ? 30 : 90;
+      c.fillStyle = nav.charge >= cost ? accent : 'rgba(255,120,100,0.95)';
+      c.fillText(`DEST ${tp.name.toUpperCase()} · COST ${cost}%` +
+                 (nav.charge >= cost ? '  ·  PRESS A' : '  ·  NEED MORE CHARGE'), 20, y + 66);
+    }
+  } else {
+    c.font = '600 16px Consolas, monospace';
+    c.fillStyle = 'rgba(150,200,235,0.7)';
+    c.fillText('EXOSUIT INVENTORY', 20, y - 12);
+    c.font = '17px Consolas, monospace';
+    Object.keys(hud.inv).forEach((k, i) => {
+      const col = i % 2, row = (i / 2) | 0;
+      const x = 20 + col * 300, yy = y + 14 + row * 26;
+      c.fillStyle = rgbCss(RESOURCES[k].col, 1);
+      c.fillRect(x, yy - 11, 12, 12);
+      c.fillStyle = 'rgba(215,238,255,0.92)';
+      c.fillText(`${RESOURCES[k].label}`, x + 22, yy);
+      c.textAlign = 'right';
+      c.fillText(String(Math.floor(hud.inv[k])), x + 270, yy);
+      c.textAlign = 'left';
+    });
+  }
+
+  // Flight instruments take over the readout while you are at the stick.
+  if (ship.piloting) {
+    const spd = V3.len(ship.vel);
+    c.fillStyle = ship.orbit ? 'rgba(120,255,200,0.95)' : rgbCss(P.glow, 0.95);
+    c.font = '600 19px Consolas, monospace';
+    c.fillText(ship.orbit ? '◆ ORBIT — WARP READY' : '◆ IN FLIGHT', 330, 100);
+    c.fillStyle = 'rgba(210,240,255,0.9)'; c.font = '16px Consolas, monospace';
+    c.fillText('ALT  ' + Math.round(ship.alt) + ' m / ' + ORBIT_ALT, 330, 124);
+    c.fillText('SPD  ' + Math.round(spd) + ' m/s', 330, 146);
+    const climb = clamp(ship.alt / ORBIT_ALT, 0, 1);
+    c.fillStyle = 'rgba(255,255,255,0.12)'; c.fillRect(330, 156, 230, 8);
+    c.fillStyle = ship.orbit ? 'rgba(120,255,200,0.9)' : rgbCss(P.glow, 0.9);
+    c.fillRect(330, 156, 230 * climb, 8);
+  }
+
+  // Course + current objective, always visible on the wrist.
+  const gi = guideInfo();
+  if (gi && !ship.piloting) {
+    c.fillStyle = rgbCss(gi.type.col, 0.95); c.font = '600 17px Consolas, monospace';
+    c.fillText('◈ ' + gi.type.id + '  ' + Math.round(gi.dist) + ' m', 330, 124);
+  }
+  const goal = currentGoal();
+  if (goal && !ship.piloting) {
+    c.fillStyle = 'rgba(160,215,245,0.8)'; c.font = '15px Consolas, monospace';
+    c.fillText('OBJECTIVE: ' + goal.label, 330, 146);
+  }
+
+  if (hud.toastT > 0) {
+    c.fillStyle = rgbCss(P.glow, 0.22); c.fillRect(20, H - 46, W - 40, 30);
+    c.fillStyle = accent; c.font = '600 16px Consolas, monospace';
+    c.fillText(hud.toast, 32, H - 25);
+  } else {
+    const goalNow = currentGoal();
+    c.fillStyle = rgbCss(P.glow, 0.85); c.font = '14px Consolas, monospace';
+    c.fillText(goalNow ? goalNow.hint
+                       : 'TRIGGER mine  ·  L-TRIGGER scan  ·  Y open nav map', 22, H - 24);
+  }
+  gl.bindTexture(gl.TEXTURE_2D, hud.tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, hud.canvas);
+  hud.dirty = false;
+}
+
+function toast(msg) { hud.toast = msg; hud.toastT = 4; hud.dirty = true; }
+function give(res, amt) {
+  hud.inv[res] = (hud.inv[res] || 0) + amt;
+  hud.dirty = true;
+}
+
+/* ========================================================= audio ========= */
+const audio = { ctx: null, on: false };
+function initAudio() {
+  if (audio.ctx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  const ctx = new AC();
+  audio.ctx = ctx;
+  const master = ctx.createGain(); master.gain.value = 0.9; master.connect(ctx.destination);
+  audio.master = master;
+
+  // Wind: looping noise through a slowly-swept low-pass.
+  const len = ctx.sampleRate * 4;
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  let last = 0;
+  for (let i = 0; i < len; i++) { last = (last + (Math.random() * 2 - 1) * 0.16) * 0.985; d[i] = last * 3; }
+  const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+  const wf = ctx.createBiquadFilter(); wf.type = 'lowpass'; wf.frequency.value = 420; wf.Q.value = 0.7;
+  const wg = ctx.createGain(); wg.gain.value = 0.16;
+  src.connect(wf).connect(wg).connect(master); src.start();
+  const lfo = ctx.createOscillator(); lfo.frequency.value = 0.06;
+  const lg = ctx.createGain(); lg.gain.value = 260;
+  lfo.connect(lg).connect(wf.frequency); lfo.start();
+  audio.wind = wg;
+
+  // Pad: a drifting chord that gives each planet its own mood.
+  const pad = ctx.createGain(); pad.gain.value = 0.0; pad.connect(master);
+  const pf = ctx.createBiquadFilter(); pf.type = 'lowpass'; pf.frequency.value = 700; pf.Q.value = 3;
+  pf.connect(pad);
+  audio.padOscs = [];
+  for (let i = 0; i < 4; i++) {
+    const o = ctx.createOscillator();
+    o.type = i === 3 ? 'triangle' : 'sine';
+    const g = ctx.createGain(); g.gain.value = 0.16;
+    o.connect(g).connect(pf); o.start();
+    audio.padOscs.push(o);
+  }
+  const plfo = ctx.createOscillator(); plfo.frequency.value = 0.045;
+  const plg = ctx.createGain(); plg.gain.value = 320;
+  plfo.connect(plg).connect(pf.frequency); plfo.start();
+  audio.pad = pad; audio.padFilter = pf;
+
+  // Mining beam.
+  const bo = ctx.createOscillator(); bo.type = 'sawtooth'; bo.frequency.value = 78;
+  const bf = ctx.createBiquadFilter(); bf.type = 'bandpass'; bf.frequency.value = 900; bf.Q.value = 6;
+  const bg = ctx.createGain(); bg.gain.value = 0;
+  bo.connect(bf).connect(bg).connect(master); bo.start();
+  audio.beam = bg; audio.beamFilter = bf;
+  audio.on = true;
+}
+function tunePad(P) {
+  if (!audio.ctx) return;
+  const root = 55 * Math.pow(2, ((P.seed % 12) / 12));
+  const ratios = [1, 1.5, 2.0, 3.0];
+  audio.padOscs.forEach((o, i) => o.frequency.setTargetAtTime(root * ratios[i] * (1 + (i - 1.5) * 0.002), audio.ctx.currentTime, 0.4));
+  audio.pad.gain.setTargetAtTime(0.10, audio.ctx.currentTime, 1.5);
+}
+function ping(freq, dur, type, vol) {
+  if (!audio.ctx) return;
+  const ctx = audio.ctx, o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type || 'sine'; o.frequency.value = freq;
+  g.gain.setValueAtTime(0, ctx.currentTime);
+  g.gain.linearRampToValueAtTime(vol || 0.18, ctx.currentTime + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + (dur || 0.5));
+  o.connect(g).connect(audio.master); o.start(); o.stop(ctx.currentTime + (dur || 0.5) + 0.05);
+}
+function setBeamAudio(on, energy) {
+  if (!audio.ctx) return;
+  audio.beam.gain.setTargetAtTime(on ? 0.055 : 0, audio.ctx.currentTime, 0.04);
+  if (on) audio.beamFilter.frequency.setTargetAtTime(700 + energy * 900, audio.ctx.currentTime, 0.05);
+}
+/* ===================================================== player & input ==== */
+let t_now = 0, lastT = 0, flash = 0, flashCol = [1, 1, 1];
+let spaceMix = 0;   // 0 = sea level, 1 = vacuum; drives sky, fog and stars
+
+const player = {
+  pos: [0, 0, 0],       // world position of the tracking-space floor origin
+  yaw: 0,               // extra yaw applied by snap turning
+  vy: 0, grounded: true, fuel: 1, swimming: false,
+};
+
+const input = {
+  moveX: 0, moveZ: 0, turn: 0, jet: 0, sprint: 0, trigger: 0,
+  scanEdge: false, aimMat: null, gripL: null, gripR: null,
+  navToggleEdge: false, navModeEdge: false, selectEdge: false, engageEdge: false,
+  mapYaw: 0, mapZoom: 0,
+};
+
+const beam = { active: false, end: [0, 0, 0], heat: 0, accum: 0, haptic: 0 };
+const scan = { t: 0, origin: [0, 0, 0] };
+
+let camMat = M4.ident();          // head/camera world matrix
+let camPos = [0, 1.6, 0];
+
+/* --- static assets ---------------------------------------------------- */
+const toolMesh = makeMesh(meshTool());
+const handMesh = makeMesh(meshHand());
+const beamMesh = makeMesh(meshBeam());
+const uiQuad = makeMesh(add(G(), prim.quad(1, 1), M4.ident(), [1, 1, 1]));
+const orbMesh = makeMesh(meshSphereUnit([1, 1, 1]));
+const waterMesh = makeWaterMesh();
+
+const progFlash = program(HEAD + `
+void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2) * 2.0 - 1.0; gl_Position = vec4(p, 0.0, 1.0); }
+`, HEAD + `
+out vec4 fragColor; uniform vec4 uColor;
+void main(){ fragColor = uColor; }`);
+
+function scaleCols(m, s) {
+  m[0] *= s; m[1] *= s; m[2] *= s;
+  m[4] *= s; m[5] *= s; m[6] *= s;
+  m[8] *= s; m[9] *= s; m[10] *= s;
+  return m;
+}
+
+/* --- planet lifecycle -------------------------------------------------- */
+function newPlanet(seed) {
+  for (const c of world.chunks.values()) disposeChunk(c);
+  world.chunks.clear(); world.queue.length = 0;
+  if (world.meshes) for (const k in world.meshes) disposeMesh(world.meshes[k]);
+  world.planet = makePlanet(seed >>> 0);
+  world.meshes = world.planet.buildMeshes();
+  world.center = [1e9, 1e9];
+  world.dirty = true;
+  spawnFauna(world.planet);
+
+  // Drop the player somewhere dry and reasonably flat.
+  const P = world.planet;
+  let sx = 0, sz = 0;
+  for (let i = 0; i < 220; i++) {
+    const a = i * 2.399, d = i * 3.2;
+    const x = Math.cos(a) * d, z = Math.sin(a) * d;
+    const h = P.height(x, z);
+    const slope = Math.hypot(P.height(x + 2, z) - P.height(x - 2, z), P.height(x, z + 2) - P.height(x, z - 2));
+    if (h > P.waterLevel + 3 && slope < 3.5) { sx = x; sz = z; break; }
+  }
+  player.pos = [sx, P.height(sx, sz), sz];
+  player.vy = 0; player.fuel = 1; player.yaw = 0;
+  nav.pois = makePOIs(P);
+  nav.waypoint = null; nav.holoDirty = true; nav.holoCenter = [1e9, 1e9];
+  nav.needCourse = true;   // a fresh world always gets a destination
+  placeShip(P);
+  for (let i = 0; i < PMAX; i++) if (par.kind[i] === 1) par.life[i] = 0;
+  seedMotes([sx, player.pos[1] + 2, sz], mix3(P.glow, [1, 1, 1], 0.35));
+  tunePad(P);
+  hud.dirty = true;
+  toast('PLANET DISCOVERED: ' + P.name.toUpperCase());
+}
+
+const LIFE_A = ['Prot', 'Xen', 'Cyt', 'Hexa', 'Ocul', 'Trib', 'Vult', 'Rhiz', 'Amoro', 'Grav'];
+const LIFE_B = ['odon', 'ophis', 'arius', 'ectus', 'ozoa', 'ipede', 'anthus', 'ormis'];
+function lifeName(r) {
+  return LIFE_A[(r() * LIFE_A.length) | 0] + LIFE_B[(r() * LIFE_B.length) | 0] +
+         ' ' + String.fromCharCode(65 + (r() * 26 | 0)) + (100 + (r() * 900 | 0));
+}
+
+/* --- simulation -------------------------------------------------------- */
+function updateSim(dt) {
+  const P = world.planet;
+  if (snapCooldown > 0) snapCooldown -= dt;
+
+  if (input.boardEdge) { input.boardEdge = false; toggleShip(); }
+  updateShip(dt);
+  updateWarp(dt);
+  const altNow = ship.piloting ? ship.alt : camPos[1] - P.height(camPos[0], camPos[2]);
+  spaceMix = clamp((altNow - ATMO_TOP) / 1300, 0, 1);
+
+  if (ship.piloting) input.turn = 0;
+  if (!ship.piloting) {
+
+  // Head basis, flattened to the ground plane, drives locomotion.
+  const fwd = V3.norm([-camMat[8], 0, -camMat[10]]);
+  const rgt = V3.norm([camMat[0], 0, camMat[2]]);
+  // Pushing the stick to its limit sprints, so speed is discoverable without
+  // knowing about the grip button.
+  const mv = V3.add(V3.scale(fwd, -input.moveZ), V3.scale(rgt, input.moveX));
+  const mag = Math.min(1, V3.len(mv));
+  const sprinting = input.sprint > 0.5 || mag > 0.93;
+  const speed = (sprinting ? 15 : 7) * (player.grounded ? 1 : 1.35);
+  if (mag > 0.02) {
+    const d = V3.scale(V3.norm(mv), mag * speed * dt);
+    player.pos[0] += d[0]; player.pos[2] += d[2];
+  }
+
+  // Snap turn, pivoting around the head so the world doesn't slide sideways.
+  if (input.turn !== 0) {
+    const a = input.turn;
+    const cx = camPos[0], cz = camPos[2];
+    const dx = player.pos[0] - cx, dz = player.pos[2] - cz;
+    const c = Math.cos(a), s = Math.sin(a);
+    player.pos[0] = cx + dx * c - dz * s;
+    player.pos[2] = cz + dx * s + dz * c;
+    player.yaw += a;
+    input.turn = 0;
+  }
+
+  // Gravity, jetpack and terrain following.
+  const ground = P.height(camPos[0], camPos[2]);
+  const water = P.waterLevel;
+  player.swimming = player.pos[1] < water - 0.2;
+  const g = P.gravity * (player.swimming ? 0.15 : 1);
+  if (input.jet > 0.15 && player.fuel > 0) {
+    player.vy += (g + 13.5) * input.jet * dt;
+    player.fuel = Math.max(0, player.fuel - dt * 0.075);   // ~13 s of thrust
+    player.grounded = false;
+    const back = M4.xform(camMat, [0, -0.55, 0.18]);
+    for (let i = 0; i < 2; i++) {
+      emit(back, [(Math.random() - 0.5) * 1.2, -3 - Math.random() * 3, (Math.random() - 0.5) * 1.2],
+           [1.0, 0.55, 0.18], 0.5 + Math.random() * 0.3, 26, 0);
+    }
+  } else if (player.grounded) {
+    player.fuel = Math.min(1, player.fuel + dt * 0.55);
+  }
+  // Falling without thrust glides rather than plummets, so flying is forgiving.
+  player.vy -= g * dt * (player.vy < 0 && !player.grounded ? 0.55 : 1);
+  if (player.swimming) { player.vy += g * 1.35 * dt; player.vy *= 0.90; }
+  player.vy = clamp(player.vy, -55, 18);
+  player.pos[1] += player.vy * dt;
+
+  if (player.pos[1] <= ground) {
+    if (player.vy < -14 && audio.ctx) ping(70, 0.25, 'sine', 0.2);
+    player.pos[1] = ground; player.vy = 0; player.grounded = true;
+    player.fuel = Math.min(1, player.fuel + dt * 0.4);
+  } else if (player.pos[1] > ground + 0.25) {
+    player.grounded = false;
+  }
+
+  }   // end on-foot movement
+
+  // --- mining beam ---
+  beam.active = false;
+  if (input.trigger > 0.35 && input.aimMat && !nav.open && !ship.piloting) {
+    const m = input.aimMat;
+    const origin = M4.xform(m, [0, 0.02, 0.34]);
+    const dir = V3.norm(V3.sub(M4.xform(m, [0, 0.02, 1.34]), origin));
+    const hit = raycastTerrain(origin, dir, 34);
+    if (hit) {
+      beam.active = true; beam.end = hit; beam.heat = Math.min(1, beam.heat + dt * 2);
+      beam.accum += dt * (0.6 + input.trigger);
+      const res = resourceAt(hit);
+      const rescol = RESOURCES[res].col;
+      for (let i = 0; i < 3; i++) {
+        emit(hit, [(Math.random() - 0.5) * 6, Math.random() * 5 + 1, (Math.random() - 0.5) * 6],
+             [rescol[0] * 1.6, rescol[1] * 1.6, rescol[2] * 1.6], 0.35 + Math.random() * 0.5, 20, 0);
+      }
+      if (beam.accum > 0.28) {
+        beam.accum = 0;
+        const amt = 1 + (Math.random() * 3 | 0);
+        give(res, amt);
+        stats.mined += amt;
+        nav.charge = Math.min(100, nav.charge + 1.1);   // mining fuels the warp drive
+        ping(420 + Math.random() * 140, 0.09, 'square', 0.05);
+        if (input.hapticR) input.hapticR(0.35, 60);
+      }
+    }
+  }
+  beam.heat = Math.max(0, beam.heat - dt * 1.2);
+  setBeamAudio(beam.active, beam.heat);
+
+  // --- scanner pulse ---
+  if (input.scanEdge && ship.piloting) input.scanEdge = false;
+  if (input.scanEdge) {
+    scan.t = 1.0;
+    scan.origin = camPos.slice();
+    ping(1180, 0.55, 'sine', 0.14);
+    setTimeout(() => ping(1560, 0.5, 'sine', 0.09), 130);
+    hud.discovered++; stats.scans++;
+    const r = mulberry32((world.planet.seed ^ (hud.discovered * 7919)) >>> 0);
+    toast((r() < 0.5 ? 'NEW LIFEFORM: ' : 'NEW FLORA: ') + lifeName(r).toUpperCase());
+    give('carbon', 2);
+    input.scanEdge = false;
+  }
+  if (scan.t > 0) scan.t = Math.max(0, scan.t - dt * 0.55);
+
+  // --- holographic nav, sites and waypoints ---
+  if (input.navToggleEdge) {
+    nav.open = !nav.open;
+    input.navToggleEdge = false;
+    ping(nav.open ? 720 : 400, 0.18, 'sine', 0.10);
+    hud.dirty = true;
+  }
+  if (input.navModeEdge) {
+    input.navModeEdge = false;
+    if (!nav.open) nav.open = true;
+    else nav.mode = (nav.mode + 1) % NAV_MODES.length;
+    if (nav.mode === M_SYSTEM && nav.viewStar !== nav.curStar && !nav.target) nav.viewStar = nav.curStar;
+    ping(600, 0.12, 'triangle', 0.08);
+    hud.dirty = true;
+  }
+  // Engaging the warp works whether or not the map is open — pick a target,
+  // close the hologram, look out of the canopy, then hit A.
+  if (input.engageEdge) {
+    input.engageEdge = false;
+    if (nav.target) beginWarp(nav.target.star, nav.target.planet);
+    else toast('NO DESTINATION SET · OPEN NAV WITH LEFT Y');
+  }
+  updateNav(dt);
+  updatePOIs(dt);
+  if (nav.needCourse) { nav.needCourse = false; setCourseToNearest(false); }
+  if (nav.waypoint) {
+    const d = Math.hypot(nav.waypoint.x - camPos[0], nav.waypoint.z - camPos[2]);
+    if (d < 10) { toast('WAYPOINT REACHED'); nav.waypoint = null; hud.dirty = true; }
+  }
+  // The panel is a canvas upload, so refresh it at ~7 Hz rather than per frame.
+  hud.acc = (hud.acc || 0) + dt;
+  if (hud.acc > 0.14) { hud.acc = 0; hud.dirty = true; }
+
+  if (hud.toastT > 0) { hud.toastT -= dt; if (hud.toastT <= 0) hud.dirty = true; }
+  if (flash > 0) flash = Math.max(0, flash - dt * 0.9);
+
+  marks.acc += dt;
+  if (marks.acc > 0.2) { marks.acc = 0; updateMarks(); }
+  pickFocus();
+
+  updateFauna(dt, camPos);
+  updateParticles(dt, camPos);
+  updateChunks(camPos[0], camPos[2], 1);   // one chunk per frame keeps hitches short
+  if (hud.dirty) drawHud();
+}
+
+/* --- rendering --------------------------------------------------------- */
+const tmpA = M4.ident(), tmpB = M4.ident(), tmpC = M4.ident(), hudAnchor = M4.ident();
+
+function useProg(pr, VP, cam) {
+  const P = world.planet, u = pr.u;
+  gl.useProgram(pr.p);
+  if (u.uVP) gl.uniformMatrix4fv(u.uVP, false, VP);
+  if (u.uCam) gl.uniform3fv(u.uCam, cam);
+  if (u.uZenith) gl.uniform3fv(u.uZenith, P.zenith);
+  if (u.uHorizon) gl.uniform3fv(u.uHorizon, P.horizon);
+  if (u.uGround) gl.uniform3fv(u.uGround, P.ground);
+  if (u.uSunDir) gl.uniform3fv(u.uSunDir, P.sunDir);
+  if (u.uSunCol) gl.uniform3fv(u.uSunCol, P.sunCol);
+  if (u.uFogDensity) gl.uniform1f(u.uFogDensity, P.fog * (1 - spaceMix * 0.96));
+  if (u.uSpace) gl.uniform1f(u.uSpace, spaceMix);
+  if (u.uTime) gl.uniform1f(u.uTime, t_now);
+  return u;
+}
+
+let objUnlit = 0;   // set while drawing holograms / energy effects
+function drawObject(mesh, model, tint, emissive, alpha, fogged, flap, phase) {
+  const u = progObj.u;
+  gl.uniform1f(u.uUnlit, objUnlit);
+  gl.uniformMatrix4fv(u.uModel, false, model);
+  gl.uniform3fv(u.uTint, tint || [1, 1, 1]);
+  gl.uniform1f(u.uEmissive, emissive || 0);
+  gl.uniform1f(u.uAlpha, alpha === undefined ? 1 : alpha);
+  gl.uniform1f(u.uFogged, fogged === false ? 0 : 1);
+  gl.uniform1f(u.uFlap, flap || 0);
+  gl.uniform1f(u.uPhase, phase || 0);
+  drawMesh(mesh);
+}
+
+function renderScene(viewMat, projMat, cam) {
+  const P = world.planet;
+  const VP = M4.mul(tmpA, projMat, viewMat);
+
+  // --- sky ---
+  gl.disable(gl.DEPTH_TEST); gl.depthMask(false); gl.disable(gl.BLEND);
+  const u = useProg(progSky, VP, cam);
+  gl.uniformMatrix4fv(u.uInvVP, false, M4.invert(tmpB, VP));
+  gl.uniform1f(u.uStars, P.stars);
+  gl.uniform1f(u.uCloud, P.cloud);
+  gl.uniform3fv(u.uNebula, P.nebula);
+  const bd = new Float32Array(12), bc = new Float32Array(12);
+  for (let i = 0; i < 3; i++) {
+    const b = P.bodies[i];
+    if (b) { bd.set([b.dir[0], b.dir[1], b.dir[2], b.cosR], i * 4); bc.set([b.col[0], b.col[1], b.col[2], b.ring], i * 4); }
+    else { bd.set([0, 1, 0, 1.0], i * 4); }
+  }
+  gl.uniform4fv(u.uBodyDir, bd); gl.uniform4fv(u.uBodyCol, bc);
+  gl.bindVertexArray(null);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // --- opaque world ---
+  gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+  useProg(progTerrain, VP, cam);
+  for (const c of world.chunks.values()) drawMesh(c.mesh);
+
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  useProg(progInst, VP, cam);
+  for (const cfg of P.props) drawInstanced(world.meshes[cfg.key]);
+
+  // --- creatures, hands, tool, beam ---
+  useProg(progObj, VP, cam);
+  for (const f of fauna.flyers) {
+    if (!f.pos) continue;
+    M4.aim(tmpC, f.pos, f.fwd, [0, 1, 0]); scaleCols(tmpC, f.scale);
+    drawObject(fauna.flyerMesh, tmpC, [1, 1, 1], 0.05, 1, true, 1, f.bob);
+  }
+  for (const gr of fauna.grazers) {
+    if (!gr.pos) continue;
+    M4.aim(tmpC, gr.pos, gr.fwd, [0, 1, 0]); scaleCols(tmpC, gr.scale);
+    drawObject(fauna.grazerMesh, tmpC, [1, 1, 1], 0, 1, true, 0, 0);
+  }
+  if (input.gripL) drawObject(handMesh, input.gripL, [1, 1, 1], 0.05, 1, false, 0, 0);
+  if (input.gripR) drawObject(handMesh, input.gripR, [1, 1, 1], 0.05, 1, false, 0, 0);
+  if (input.aimMat && !ship.piloting) {
+    M4.mul(tmpC, input.aimMat, trs([0, -0.02, 0.02], [0, 0, 0], [1, 1, 1]));
+    drawObject(toolMesh, tmpC, [1, 1, 1], beam.heat * 0.5, 1, false, 0, 0);
+  }
+  renderShip(VP, cam);
+
+  // --- water ---
+  if (P.waterLevel > -9000) {
+    const uw = useProg(progWater, VP, cam);
+    gl.uniform1f(uw.uLevel, P.waterLevel);
+    gl.uniform3fv(uw.uDeep, P.deep);
+    gl.uniform3fv(uw.uShallow, P.shallow);
+    drawMesh(waterMesh);
+  }
+
+  // --- additive effects ---
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.depthMask(false);
+  objUnlit = 1;
+  useProg(progObj, VP, cam);
+  if (beam.active && input.aimMat) {
+    const origin = M4.xform(input.aimMat, [0, 0.02, 0.34]);
+    const dir = V3.sub(beam.end, origin);
+    const len = V3.len(dir);
+    M4.aim(tmpC, origin, dir, [0, 1, 0]);
+    const w = 0.016 + Math.sin(t_now * 40) * 0.004;
+    tmpC[0] *= w; tmpC[1] *= w; tmpC[2] *= w;
+    tmpC[4] *= w; tmpC[5] *= w; tmpC[6] *= w;
+    tmpC[8] *= len; tmpC[9] *= len; tmpC[10] *= len;
+    drawObject(beamMesh, tmpC, [1.0, 0.42, 0.10], 1.2, 0.8, false, 0, 0);
+    const rr = 0.13 + Math.sin(t_now * 22) * 0.015;
+    M4.compose(tmpC, [0, 0, 0, 1], beam.end, [rr, rr, rr]);
+    drawObject(orbMesh, tmpC, [1.0, 0.55, 0.16], 1.1, 0.55, false, 0, 0);
+  }
+  if (scan.t > 0) {
+    const r = (1 - scan.t) * 90 + 1;
+    M4.compose(tmpC, [0, 0, 0, 1], scan.origin, [r, r * 0.55, r]);
+    drawObject(orbMesh, tmpC, P.glow, 0.9, scan.t * scan.t * 0.30, false, 0, 0);
+  }
+
+  // --- beacons over sites, course guidance, and the wrist hologram ---
+  renderNavWorld(VP, cam);
+  renderGuide(VP, cam);
+
+  // --- particles ---
+  const up = useProg(progPts, VP, cam);
+  gl.uniform1f(up.uScale, 1.0);
+  gl.uniform1f(up.uFade, 1.0);
+  gl.uniformMatrix4fv(up.uModel, false, M4.ident());
+  if (par.count) {
+    gl.bindVertexArray(par.mesh.vao);
+    gl.drawArrays(gl.POINTS, 0, par.count);
+  }
+
+  renderWarpStreaks(VP, cam);
+  renderMarks(VP, cam);
+  renderNav(VP, cam);
+  objUnlit = 0;
+
+  // --- wrist display (hand-mounted in VR, fixed to the view on desktop) ---
+  if (input.gripL || !xrSession) {
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    const uu = useProg(progUI, VP, cam);
+    const anchor = input.gripL ||
+      M4.mul(hudAnchor, camMat, trs([-0.30, -0.26, -0.60], [0.45, 0.30, 0], [1, 1, 1]));
+    M4.mul(tmpC, anchor, trs([0, 0.055, 0.03], [-1.15, 0, 0], [0.26, 0.13, 1]));
+    gl.uniformMatrix4fv(uu.uModel, false, tmpC);
+    gl.uniform1f(uu.uAlpha, 1);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, hud.tex);
+    gl.uniform1i(uu.uTex, 0);
+    gl.disable(gl.DEPTH_TEST);
+    drawMesh(uiQuad);
+    gl.enable(gl.DEPTH_TEST);
+  }
+
+  // --- warp flash ---
+  if (flash > 0.001) {
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.DEPTH_TEST);
+    gl.useProgram(progFlash.p);
+    gl.uniform4f(progFlash.u.uColor, flashCol[0], flashCol[1], flashCol[2], flash);
+    gl.bindVertexArray(null);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.enable(gl.DEPTH_TEST);
+  }
+
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
+}
+
+/* ======================================================= XR session ====== */
+let xrSession = null, xrBase = null, xrSpace = null, xrLayer = null;
+const prevBtn = { l: {}, r: {} };
+
+function offsetSpace() {
+  if (!xrBase) return null;
+  const q = Q.yaw(player.yaw);
+  const iq = Q.conj(q);
+  const ip = Q.rot(iq, [-player.pos[0], -player.pos[1], -player.pos[2]]);
+  return xrBase.getOffsetReferenceSpace(new XRRigidTransform(
+    { x: ip[0], y: ip[1], z: ip[2] },
+    { x: iq[0], y: iq[1], z: iq[2], w: iq[3] }));
+}
+
+const ax = (h, i) => (h && h.gp && h.gp.axes.length > i) ? h.gp.axes[i] : 0;
+const bv = (h, i) => (h && h.gp && h.gp.buttons.length > i) ? h.gp.buttons[i].value : 0;
+const bp = (h, i) => (h && h.gp && h.gp.buttons.length > i) ? h.gp.buttons[i].pressed : false;
+
+let snapCooldown = 0;
+
+function readXRInput(frame) {
+  let L = null, R = null;
+  for (const src of xrSession.inputSources) {
+    const rec = { gp: src.gamepad, src };
+    if (src.gripSpace) {
+      const p = frame.getPose(src.gripSpace, xrSpace);
+      rec.grip = p ? p.transform.matrix : null;
+    }
+    if (src.targetRaySpace) {
+      const p = frame.getPose(src.targetRaySpace, xrSpace);
+      rec.ray = p ? p.transform.matrix : null;
+    }
+    if (src.handedness === 'left') L = rec;
+    else if (src.handedness === 'right') R = rec;
+  }
+  input.moveX = Math.abs(ax(L, 2)) > 0.12 ? ax(L, 2) : 0;
+  input.moveZ = Math.abs(ax(L, 3)) > 0.12 ? ax(L, 3) : 0;
+  input.sprint = bv(L, 1);
+  input.jet = bv(R, 1);
+  input.trigger = bv(R, 0);
+  input.gripL = L && L.grip ? L.grip : null;
+  input.gripR = R && R.grip ? R.grip : null;
+  input.aimMat = R && R.ray ? M4.mul(new Float32Array(16), R.ray, trs([0, -0.015, 0], [0, Math.PI, 0], [1, 1, 1])) : null;
+
+  const lt = bp(L, 0);
+  if (lt && !prevBtn.l.trigger && !nav.open) input.scanEdge = true;
+  prevBtn.l.trigger = lt;
+
+  // Left Y opens the hologram, left X cycles Surface / System / Galaxy.
+  const ly = bp(L, 5), lxb = bp(L, 4);
+  if (ly && !prevBtn.l.y) input.navToggleEdge = true;
+  if (lxb && !prevBtn.l.x) input.navModeEdge = true;
+  prevBtn.l.y = ly; prevBtn.l.x = lxb;
+
+  // Right trigger selects on the map; right A engages the selected warp.
+  const rt = bp(R, 0), ra = bp(R, 4), rb = bp(R, 5);
+  if (rt && !prevBtn.r.trigger && nav.open) input.selectEdge = true;
+  if (ra && !prevBtn.r.a) input.engageEdge = true;
+  if (rb && !prevBtn.r.b) input.boardEdge = true;      // board / leave the ship
+  prevBtn.r.trigger = rt; prevBtn.r.a = ra; prevBtn.r.b = rb;
+
+  const rx = ax(R, 2), ry = ax(R, 3);
+  if (nav.open) {
+    input.mapYaw = Math.abs(rx) > 0.15 ? rx : 0;
+    input.mapZoom = Math.abs(ry) > 0.15 ? ry : 0;
+  } else {
+    input.mapYaw = input.mapZoom = 0;
+    if (Math.abs(rx) > 0.7 && snapCooldown <= 0) {
+      input.turn = -Math.sign(rx) * Math.PI / 6;
+      snapCooldown = 0.28;
+      if (R && R.gp && R.gp.hapticActuators && R.gp.hapticActuators[0]) R.gp.hapticActuators[0].pulse(0.3, 40);
+    }
+  }
+  input.hapticR = (i, ms) => {
+    if (R && R.gp && R.gp.hapticActuators && R.gp.hapticActuators[0]) R.gp.hapticActuators[0].pulse(i, ms);
+  };
+}
+
+function onXRFrame(time, frame) {
+  xrSession.requestAnimationFrame(onXRFrame);
+  const layer = xrSession.renderState.baseLayer;
+  if (!layer) return;
+
+  // Present *something* every single frame. If the compositor never receives a
+  // frame — because tracking has not settled, or because the simulation threw —
+  // the headset sits on its loading splash forever, so the clear happens before
+  // anything that is allowed to fail.
+  gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+  gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
+  gl.clearColor(0.015, 0.02, 0.045, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  diag.frames++;
+
+  try {
+    const dt = Math.min(0.05, (time - lastT) / 1000 || 0.016);
+    lastT = time; t_now += dt;
+
+    xrSpace = offsetSpace();
+    const pose = xrSpace ? frame.getViewerPose(xrSpace) : null;
+    if (!pose || !pose.views.length) { diag.nullPose++; return; }
+
+    camMat = pose.transform.matrix;
+    camPos = [pose.transform.position.x, pose.transform.position.y, pose.transform.position.z];
+
+    readXRInput(frame);
+    updateSim(dt);
+
+    for (const view of pose.views) {
+      const vp = layer.getViewport(view);
+      if (!vp || !vp.width) continue;
+      gl.viewport(vp.x, vp.y, vp.width, vp.height);
+      renderScene(view.transform.inverse.matrix, view.projectionMatrix,
+                  [view.transform.position.x, view.transform.position.y, view.transform.position.z]);
+    }
+  } catch (err) {
+    if (!diag.err) {
+      diag.err = err;
+      logDiag('Frame error: ' + (err && err.message ? err.message : err));
+    }
+  }
+}
+
+async function startVR() {
+  const btn = document.getElementById('vr');
+  btn.disabled = true;
+  try {
+    initAudio();
+    if (audio.ctx && audio.ctx.state === 'suspended') await audio.ctx.resume();
+    tunePad(world.planet);
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
+    });
+    xrSession = session;
+    await gl.makeXRCompatible();
+    xrLayer = new XRWebGLLayer(session, gl, { antialias: true, framebufferScaleFactor: 1.0 });
+    session.updateRenderState({ baseLayer: xrLayer, depthNear: 0.05, depthFar: 1400 });
+    try { xrLayer.fixedFoveation = 0.6; } catch (e) { /* not supported everywhere */ }
+
+    // Floor-relative is preferred, but never let the session hang because a
+    // reference space was unavailable — 'viewer' always exists.
+    xrBase = null;
+    for (const kind of ['local-floor', 'local', 'viewer']) {
+      try { xrBase = await session.requestReferenceSpace(kind); diag.space = kind; break; }
+      catch (e) { logDiag('reference space "' + kind + '" unavailable'); }
+    }
+    if (!xrBase) throw new Error('no usable reference space');
+    if (diag.space === 'viewer') player.pos[1] += 1.6;   // no floor -> fake eye height
+
+    xrSpace = offsetSpace();
+    document.getElementById('ui').classList.add('hidden');
+    session.addEventListener('end', () => {
+      xrSession = null;
+      document.getElementById('ui').classList.remove('hidden');
+      document.getElementById('msg').textContent =
+        `session ended · ${diag.frames} frames · ${diag.nullPose} without pose · space "${diag.space}"` +
+        (diag.err ? ' · errored' : '');
+      btn.disabled = false;
+      lastT = performance.now();
+      requestAnimationFrame(onFlatFrame);
+    });
+    lastT = performance.now();
+    session.requestAnimationFrame(onXRFrame);
+  } catch (err) {
+    logDiag('Could not start VR: ' + (err && err.message ? err.message : err));
+    document.getElementById('msg').textContent = 'Could not start VR: ' + err.message;
+    xrSession = null;
+    btn.disabled = false;
+    requestAnimationFrame(onFlatFrame);
+  }
+}
+
+/* ======================================================= desktop mode ==== */
+const keys = {};
+let flatYaw = 0, flatPitch = 0, flatActive = false, mouseDown = false;
+
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space' || e.code === 'Tab') e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+canvas.addEventListener('mousedown', e => { mouseDown = true; if (document.pointerLockElement !== canvas) canvas.requestPointerLock(); });
+addEventListener('mouseup', () => { mouseDown = false; });
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== canvas) return;
+  flatYaw -= e.movementX * 0.0022;
+  flatPitch = clamp(flatPitch - e.movementY * 0.0022, -1.5, 1.5);
+});
+
+function readFlatInput() {
+  input.moveX = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
+  input.moveZ = (keys.KeyS ? 1 : 0) - (keys.KeyW ? 1 : 0);
+  input.sprint = (keys.ShiftLeft || keys.ShiftRight) ? 1 : 0;
+  input.jet = keys.Space ? 1 : 0;
+  input.trigger = mouseDown ? 1 : 0;
+  if (keys.KeyR && !prevBtn.r.scan && !nav.open) input.scanEdge = true;
+  prevBtn.r.scan = !!keys.KeyR;
+  input.hapticR = () => {};
+
+  if (keys.KeyM && !prevBtn.r.m) input.navToggleEdge = true;
+  prevBtn.r.m = !!keys.KeyM;
+  if (keys.Tab && !prevBtn.r.tab) input.navModeEdge = true;
+  prevBtn.r.tab = !!keys.Tab;
+  if (mouseDown && !prevBtn.r.click && nav.open) input.selectEdge = true;
+  prevBtn.r.click = mouseDown;
+  if (keys.KeyE && !prevBtn.r.e) input.engageEdge = true;
+  prevBtn.r.e = !!keys.KeyE;
+  if (keys.KeyF && !prevBtn.r.f) input.boardEdge = true;
+  prevBtn.r.f = !!keys.KeyF;
+  input.mapYaw = nav.open ? ((keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0)) : 0;
+  input.mapZoom = nav.open ? ((keys.ArrowDown ? 1 : 0) - (keys.ArrowUp ? 1 : 0)) : 0;
+
+  // A virtual right hand holding the multi-tool, hip-fired from the camera.
+  input.aimMat = M4.mul(new Float32Array(16), camMat,
+    trs([0.16, -0.20, -0.42], [flatPitch * 0.15, Math.PI, 0], [0.62, 0.62, 0.62]));
+  input.gripL = null; input.gripR = null;
+}
+
+function onFlatFrame(time) {
+  if (xrSession) return;
+  requestAnimationFrame(onFlatFrame);
+  const dt = Math.min(0.05, (time - lastT) / 1000 || 0.016);
+  lastT = time; t_now += dt;
+
+  const w = Math.floor(canvas.clientWidth * Math.min(devicePixelRatio, 2));
+  const h = Math.floor(canvas.clientHeight * Math.min(devicePixelRatio, 2));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+
+  camMat = trs([player.pos[0], player.pos[1] + 1.7, player.pos[2]], [flatPitch, flatYaw, 0], [1, 1, 1]);
+  camPos = [camMat[12], camMat[13], camMat[14]];
+  readFlatInput();
+  updateSim(dt);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  const proj = M4.perspective(new Float32Array(16), 1.15, canvas.width / canvas.height, 0.05, 1400);
+  const view = M4.invert(new Float32Array(16), camMat);
+  renderScene(view, proj, camPos);
+
+  if (flatActive) {
+    document.getElementById('hud2d').textContent =
+      `${world.planet.name}  ·  ${world.planet.arch.id}\n` +
+      `Fe ${Math.floor(hud.inv.ferrite)}  C ${Math.floor(hud.inv.carbon)}  Na ${Math.floor(hud.inv.sodium)}  ` +
+      `Co ${Math.floor(hud.inv.cobalt)}  Em ${Math.floor(hud.inv.emeril)}\n` +
+      `jetpack ${Math.round(player.fuel * 100)}%   warp ${Math.round(nav.charge)}%` +
+      (nav.open ? `\nNAV: ${NAV_MODES[nav.mode]}` +
+                  (nav.hover >= 0 ? `  →  ${nav.items[nav.hover].label}` : '') : '') +
+      (nav.waypoint && !nav.open
+        ? `\n◈ ${nav.waypoint.type.id} ${Math.round(Math.hypot(nav.waypoint.x - camPos[0], nav.waypoint.z - camPos[2]))} m` : '') +
+      (hud.toastT > 0 ? `\n${hud.toast}` : '');
+  }
+}
+
+/* ==================================================== holographic nav ==== */
+const progHolo = program(HEAD + `
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNrm;
+layout(location=2) in vec3 aCol;
+uniform mat4 uVP, uModel;
+out vec3 vC, vL, vN, vW;
+void main(){
+  vC = aCol; vL = aPos;
+  vN = mat3(uModel) * aNrm;
+  vec4 w = uModel * vec4(aPos, 1.0);
+  vW = w.xyz;
+  gl_Position = uVP * w;
+}`, HEAD + `
+in vec3 vC, vL, vN, vW;
+out vec4 fragColor;
+uniform vec3 uCam;
+uniform float uTime, uAlpha, uGrid;
+void main(){
+  vec3 n = normalize(vN);
+  vec3 v = normalize(uCam - vW);
+  float rim = pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 2.2);
+  float a = 0.30 + rim * 0.85;
+  if (uGrid > 0.5) {                       // engraved contour grid
+    vec2 g = abs(fract(vL.xz * 14.0) - 0.5);
+    a += (1.0 - smoothstep(0.0, 0.055, min(g.x, g.y))) * 0.40;
+    float band = abs(fract(vL.y * 26.0) - 0.5);
+    a += (1.0 - smoothstep(0.0, 0.12, band)) * 0.18;
+  }
+  float sweep = 1.0 - smoothstep(0.0, 0.10, abs(fract(uTime * 0.16) * 2.4 - 1.2 - vL.z));
+  a += sweep * 0.55;
+  fragColor = vec4(vC * (0.75 + rim * 1.3 + sweep * 1.1), a * uAlpha);
+}`);
+
+/* --- the universe ----------------------------------------------------- */
+const UNIVERSE_SEED = 0x4e4d5330;
+const STAR_CLASSES = [
+  { col: [0.66, 0.78, 1.00], n: 'BLUE' }, { col: [1.00, 0.98, 0.92], n: 'WHITE' },
+  { col: [1.00, 0.88, 0.55], n: 'YELLOW' }, { col: [1.00, 0.62, 0.34], n: 'ORANGE' },
+  { col: [1.00, 0.42, 0.38], n: 'RED' },
+];
+
+function makeGalaxy() {
+  const r = mulberry32(UNIVERSE_SEED), stars = [];
+  const N = 190, ARMS = 5;
+  for (let i = 0; i < N; i++) {
+    const t = Math.pow(r(), 0.55);
+    const ang = (i % ARMS) * (Math.PI * 2 / ARMS) + t * 3.05 + (r() - 0.5) * 0.55;
+    const rad = 0.13 + t * 0.83;
+    const cls = STAR_CLASSES[(Math.pow(r(), 1.7) * STAR_CLASSES.length) | 0];
+    stars.push({
+      i, cls,
+      pos: [Math.cos(ang) * rad, (r() - 0.5) * 0.11 * (1 - t * 0.55), Math.sin(ang) * rad],
+      seed: (UNIVERSE_SEED ^ Math.imul(i + 1, 2654435761)) >>> 0,
+      size: 26 + r() * 34,
+    });
+  }
+  return stars;
+}
+
+function starName(star) {
+  if (!star.name) star.name = planetName(mulberry32(star.seed ^ 0x51ee7a)).toUpperCase();
+  return star.name;
+}
+
+// Systems are expensive-ish (each planet builds a noise table), so cache them.
+function getSystem(index) {
+  if (nav.systems.has(index)) return nav.systems.get(index);
+  const star = nav.galaxy[index];
+  const r = mulberry32(star.seed);
+  const n = 2 + (r() * 5 | 0);
+  const planets = [];
+  for (let i = 0; i < n; i++) {
+    const seed = (star.seed ^ Math.imul(i + 1, 40503)) >>> 0;
+    const P = makePlanet(seed);
+    planets.push({
+      seed, name: P.name, arch: P.arch, gravity: P.gravity,
+      col: mix3(P.grass, P.horizon, 0.42), glow: P.glow,
+      orbit: 0.30 + i * (0.60 / Math.max(n - 1, 1)) + r() * 0.025,
+      ang: r() * 6.283, size: 0.050 + r() * 0.032,
+      moons: (r() * 3) | 0,
+    });
+  }
+  const sys = { star, index, name: starName(star), planets };
+  nav.systems.set(index, sys);
+  return sys;
+}
+
+/* --- points of interest ------------------------------------------------ */
+const POI_TYPES = [
+  { id: 'MONOLITH',      col: [1.00, 0.76, 0.30], charge: 20, res: 'sodium',  amt: 28 },
+  { id: 'CRASHED FREIGHTER', col: [1.00, 0.50, 0.34], charge: 26, res: 'ferrite', amt: 55 },
+  { id: 'CRYSTAL CACHE', col: [0.50, 1.00, 0.86], charge: 16, res: 'emeril',  amt: 24 },
+  { id: 'ANCIENT BEACON', col: [0.58, 0.80, 1.00], charge: 24, res: 'cobalt',  amt: 32 },
+  { id: 'DROP POD',      col: [0.88, 0.60, 1.00], charge: 18, res: 'carbon',  amt: 40 },
+];
+
+function makePOIs(P) {
+  const r = mulberry32(P.seed ^ 0x9013a7), list = [];
+  for (let i = 0; i < 11; i++) {
+    const a = r() * 6.283, d = 140 + r() * 1500;
+    const x = Math.cos(a) * d, z = Math.sin(a) * d;
+    const h = P.height(x, z);
+    if (h < P.waterLevel + 1) continue;
+    list.push({ x, z, y: h, type: POI_TYPES[(r() * POI_TYPES.length) | 0], found: false });
+  }
+  return list;
+}
+
+/* --- nav state --------------------------------------------------------- */
+const NAV_MODES = ['MISSION LOG', 'SURFACE SCAN', 'STAR SYSTEM', 'GALAXY'];
+const M_MISSION = 0, M_SURFACE = 1, M_SYSTEM = 2, M_GALAXY = 3;
+
+/* Progress counters drive both the objective list and the tutorial prompts. */
+const stats = { salvaged: 0, scans: 0, mined: 0, hops: 0, jumps: 0, worlds: 1, boarded: 0, orbits: 0 };
+
+const GOALS = [
+  { label: 'Salvage a surface site',      target: 1,   get: () => stats.salvaged, hint: 'Follow the glowing path — it leads to the marked site.' },
+  { label: 'Mine 60 units of material',   target: 60,  get: () => stats.mined,    hint: 'Hold the RIGHT TRIGGER on rocks, crystals or the ground.' },
+  { label: 'Scan 3 lifeforms',            target: 3,   get: () => stats.scans,    hint: 'Pull the LEFT TRIGGER to fire a scanner pulse.' },
+  { label: 'Board your starship',         target: 1,   get: () => stats.boarded,  hint: 'Press RIGHT B — if the ship is far off it flies to you and lands. Press B again to board.' },
+  { label: 'Fly to orbit (1800 m up)',    target: 1,   get: () => stats.orbits,   hint: 'RIGHT TRIGGER thrusts, point your hand to steer, LEFT STICK forward climbs.' },
+  { label: 'Charge the warp drive to 30%', target: 30, get: () => nav.charge,     hint: 'Salvaging sites and mining both charge the drive.' },
+  { label: 'Warp to another planet',      target: 1,   get: () => stats.hops,     hint: 'From orbit: LEFT Y opens nav · LEFT X to STAR SYSTEM · point at a planet, TRIGGER, then RIGHT A.' },
+  { label: 'Reach another star system',   target: 1,   get: () => stats.jumps,    hint: 'Charge to 90%, reach orbit, open GALAXY, pick a star, then a planet, then RIGHT A.' },
+];
+
+function currentGoal() {
+  for (const g of GOALS) if (g.get() < g.target) return g;
+  return null;
+}
+const MAP_SPAN = 1400;      // metres covered by the surface hologram
+const MAP_RELIEF = 130;     // metres mapped onto the hologram's full height
+
+const nav = {
+  open: false, anim: 0, mode: 0,
+  yaw: 0, zoom: 1,
+  galaxy: null, systems: new Map(),
+  curStar: 0, curPlanet: 0, viewStar: 0, visited: new Set(),
+  target: null,                 // {star, planet} pending warp
+  items: [], hover: -1,
+  holo: null, holoCenter: [1e9, 1e9], holoDirty: true,
+  galaxyPts: null,
+  pois: [], waypoint: null,
+  charge: 55,                   // warp charge, 0..100
+};
+
+function makePointCloud(list) {   // list of {pos, col, size}
+  const buf = new Float32Array(list.length * 7);
+  list.forEach((p, i) => {
+    buf.set([p.pos[0], p.pos[1], p.pos[2], p.col[0], p.col[1], p.col[2], p.size], i * 7);
+  });
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, buf, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 28, 12);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 24);
+  gl.bindVertexArray(null);
+  return { vao, vb, count: list.length };
+}
+
+// Thin ring in the XZ plane, radius 1 — scaled per orbit.
+const ringMesh = (() => {
+  const g = { pos: [], nrm: [], idx: [] }, S = 72;
+  for (let i = 0; i <= S; i++) {
+    const a = i / S * Math.PI * 2, c = Math.cos(a), s = Math.sin(a);
+    g.pos.push(c * 0.992, 0, s * 0.992, c * 1.008, 0, s * 1.008);
+    g.nrm.push(0, 1, 0, 0, 1, 0);
+  }
+  for (let i = 0; i < S; i++) { const a = i * 2; g.idx.push(a, a + 2, a + 3, a, a + 3, a + 1); }
+  return makeMesh(add(G(), g, M4.ident(), [1, 1, 1]));
+})();
+const markerMesh = makeMesh(faceted(add(G(), prim.cyl(0.5, 0, 1, 5), M4.ident(), [1, 1, 1])));
+// Same cone, rebuilt along +Z so M4.aim can point it at a destination.
+const chevronMesh = makeMesh(faceted(
+  add(G(), prim.cyl(0.5, 0, 1, 4), trs([0, 0, 0], [Math.PI / 2, 0, 0], [1, 1, 1]), [1, 1, 1])));
+
+/* Surface hologram: a real mesh of the terrain around the player. */
+function buildHoloTerrain() {
+  const P = world.planet, GN = 48;
+  const cx = camPos[0], cz = camPos[2];
+  nav.holoCenter = [cx, cz];
+  const step = MAP_SPAN / (GN - 1), half = MAP_SPAN / 2;
+  const hs = new Float32Array(GN * GN);
+  for (let j = 0; j < GN; j++)
+    for (let i = 0; i < GN; i++)
+      hs[j * GN + i] = P.height(cx - half + i * step, cz - half + j * step);
+
+  const baseH = P.height(cx, cz);
+  const yOf = h => clamp((h - baseH) / MAP_RELIEF, -1, 1) * 0.30;
+  const buf = new Float32Array(GN * GN * 10);
+  for (let j = 0; j < GN; j++) {
+    for (let i = 0; i < GN; i++) {
+      const h = hs[j * GN + i];
+      const hl = hs[j * GN + Math.max(i - 1, 0)], hr = hs[j * GN + Math.min(i + 1, GN - 1)];
+      const hd = hs[Math.max(j - 1, 0) * GN + i], hu = hs[Math.min(j + 1, GN - 1) * GN + i];
+      const n = V3.norm([(hl - hr) / MAP_RELIEF * 0.30, 2 * (2 / (GN - 1)), (hd - hu) / MAP_RELIEF * 0.30]);
+      const t = clamp((h - baseH) / MAP_RELIEF * 0.5 + 0.5, 0, 1);
+      let c = mix3([0.10, 0.52, 0.80], [0.55, 0.95, 1.00], t);
+      if (t > 0.72) c = mix3(c, [1.00, 0.86, 0.52], (t - 0.72) / 0.28);
+      if (h < P.waterLevel) c = [0.06, 0.20, 0.62];
+      const o = (j * GN + i) * 10;
+      buf[o] = (i / (GN - 1) - 0.5) * 2; buf[o + 1] = yOf(h); buf[o + 2] = (j / (GN - 1) - 0.5) * 2;
+      buf[o + 3] = n[0]; buf[o + 4] = n[1]; buf[o + 5] = n[2];
+      buf[o + 6] = c[0]; buf[o + 7] = c[1]; buf[o + 8] = c[2];
+    }
+  }
+  const idx = new Uint16Array((GN - 1) * (GN - 1) * 6);
+  let k = 0;
+  for (let j = 0; j < GN - 1; j++) for (let i = 0; i < GN - 1; i++) {
+    const a = j * GN + i;
+    idx[k++] = a; idx[k++] = a + GN; idx[k++] = a + GN + 1;
+    idx[k++] = a; idx[k++] = a + GN + 1; idx[k++] = a + 1;
+  }
+  disposeMesh(nav.holo);
+  nav.holo = makeMeshRaw(buf, idx);
+  nav.holoBase = baseH;
+  nav.holoDirty = false;
+}
+
+const holoLocal = (x, z) => [(x - nav.holoCenter[0]) / (MAP_SPAN / 2), 0, (z - nav.holoCenter[1]) / (MAP_SPAN / 2)];
+
+/* Where the hologram floats: above the left hand, or in front on desktop. */
+const navModelM = new Float32Array(16), navTmp = new Float32Array(16);
+function mapModel() {
+  // Projected just off the palm, tilted so it reads from a natural hand pose.
+  // Without a hand to mount on it stands up more, to face the camera.
+  const s = 0.19 * nav.anim * nav.zoom;
+  if (input.gripL) return M4.mul(navModelM, input.gripL, trs([0, 0.17, -0.03], [-0.35, nav.yaw, 0], [s, s, s]));
+  const local = trs([0, 0.17, -0.03], [-1.05, nav.yaw, 0], [s, s, s]);
+  return M4.mul(navModelM, camMat, M4.mul(navTmp, trs([0, -0.34, -0.90], [0, 0, 0], [1, 1, 1]), local));
+}
+
+function buildNavItems() {
+  const items = nav.items = [];
+  if (nav.mode === M_MISSION) return;
+  if (nav.mode === M_SURFACE) {
+    for (const p of nav.pois) {
+      const l = holoLocal(p.x, p.z);
+      if (Math.abs(l[0]) > 1.05 || Math.abs(l[2]) > 1.05) continue;
+      items.push({
+        pos: [l[0], clamp((p.y - nav.holoBase) / MAP_RELIEF, -1, 1) * 0.30 + 0.10, l[2]],
+        r: 0.11, kind: 'poi', ref: p,
+        label: p.type.id + (p.found ? ' · SALVAGED' : ''),
+        sub: Math.round(Math.hypot(p.x - camPos[0], p.z - camPos[2])) + ' m away',
+        col: p.type.col,
+      });
+    }
+    if (!ship.piloting) {
+      const l = holoLocal(ship.pos[0], ship.pos[2]);
+      if (Math.abs(l[0]) <= 1.05 && Math.abs(l[2]) <= 1.05) {
+        items.push({
+          pos: [l[0], clamp((ship.pos[1] - nav.holoBase) / MAP_RELIEF, -1, 1) * 0.30 + 0.10, l[2]],
+          r: 0.11, kind: 'poi', ref: { x: ship.pos[0], z: ship.pos[2], type: SHIP_MARK },
+          label: 'STARSHIP',
+          sub: Math.round(Math.hypot(ship.pos[0] - camPos[0], ship.pos[2] - camPos[2])) + ' m away',
+          col: SHIP_MARK.col,
+        });
+      }
+    }
+  } else if (nav.mode === M_SYSTEM) {
+    const sys = getSystem(nav.viewStar);
+    sys.planets.forEach((pl, i) => {
+      const here = nav.viewStar === nav.curStar && i === nav.curPlanet;
+      const seen = nav.visited.has(nav.viewStar + ':' + i);
+      items.push({
+        pos: [Math.cos(pl.ang) * pl.orbit, 0, Math.sin(pl.ang) * pl.orbit],
+        r: 0.13, kind: 'planet', ref: { star: nav.viewStar, planet: i },
+        label: (seen ? pl.name.toUpperCase() : 'UNCHARTED') + (here ? ' · YOU ARE HERE' : ''),
+        // Worlds you have not landed on read as unsurveyed silhouettes.
+        sub: seen ? pl.arch.id + ' · ' + pl.arch.hazv + ' · g ' + pl.gravity.toFixed(1)
+                  : 'no survey data · land to catalogue',
+        col: seen ? pl.col : [0.32, 0.40, 0.48], size: pl.size, here, seen,
+      });
+    });
+  } else {
+    // 190 stars never change, so build the list once and just refresh "here".
+    if (!nav.galaxyItems) {
+      nav.galaxyItems = nav.galaxy.map((st, i) => ({
+        pos: st.pos, r: 0.055, kind: 'star', ref: i,
+        label: starName(st), sub: st.cls.n + ' STAR', col: st.cls.col, here: false,
+      }));
+    }
+    for (let i = 0; i < nav.galaxyItems.length; i++) nav.galaxyItems[i].here = (i === nav.curStar);
+    nav.items = nav.galaxyItems;
+  }
+}
+
+// Ray-pick in hologram space using the right-hand aim.
+function pickNavItem(model) {
+  if (!input.aimMat || !nav.items.length) return -1;
+  const oW = M4.xform(input.aimMat, [0, 0.02, 0.34]);
+  const dW = V3.sub(M4.xform(input.aimMat, [0, 0.02, 1.34]), oW);
+  const inv = M4.invert(navTmp, model);
+  const o = M4.xform(inv, oW);
+  const d = V3.norm(M4.xformDir(inv, dW));
+  let best = -1, bestT = 1e9;
+  for (let i = 0; i < nav.items.length; i++) {
+    const it = nav.items[i];
+    const oc = V3.sub(it.pos, o);
+    const t = V3.dot(oc, d);
+    if (t < 0) continue;
+    const perp = V3.len(V3.sub(oc, V3.scale(d, t)));
+    if (perp < it.r && t < bestT) { bestT = t; best = i; }
+  }
+  return best;
+}
+
+function travelTo(starIndex, planetIndex) {
+  const interstellar = starIndex !== nav.curStar;
+  const cost = interstellar ? 90 : 30;
+  if (nav.charge < cost) {
+    toast('WARP CHARGE TOO LOW · NEED ' + cost + '%');
+    ping(160, 0.35, 'square', 0.12);
+    return;
+  }
+  nav.charge -= cost;
+  nav.curStar = starIndex; nav.viewStar = starIndex; nav.curPlanet = planetIndex;
+  nav.target = null;
+  stats.hops++; stats.worlds++;
+  if (interstellar) stats.jumps++;
+  nav.visited.add(starIndex + ':' + planetIndex);
+  mission.dirty = true;
+  const sys = getSystem(starIndex);
+  flash = 1;
+  newPlanet(sys.planets[planetIndex].seed);
+  toast((interstellar ? 'WARPED TO ' : 'ARRIVED AT ') + sys.planets[planetIndex].name.toUpperCase());
+  if (audio.ctx) {
+    ping(660, 1.4, 'sine', 0.16); ping(990, 1.1, 'triangle', 0.10);
+    setTimeout(() => ping(1320, 0.8, 'sine', 0.09), 240);
+  }
+}
+
+function updateNav(dt) {
+  nav.anim += ((nav.open ? 1 : 0) - nav.anim) * Math.min(1, dt * 9);
+  if (!nav.open && nav.anim < 0.01) { nav.hover = -1; input.selectEdge = false; return; }
+
+  if (nav.mode === M_SURFACE) {
+    const moved = Math.hypot(camPos[0] - nav.holoCenter[0], camPos[2] - nav.holoCenter[2]);
+    if (nav.holoDirty || !nav.holo || moved > MAP_SPAN * 0.18) buildHoloTerrain();
+  }
+  buildNavItems();
+  nav.hover = pickNavItem(mapModel());
+
+  // Right stick spins and zooms the hologram while it is open.
+  nav.yaw += input.mapYaw * dt * 2.2;
+  nav.zoom = clamp(nav.zoom - input.mapZoom * dt * 1.1, 0.6, 1.9);
+
+  if (input.selectEdge && nav.mode === M_MISSION) {
+    input.selectEdge = false;
+    setCourseToNearest(true);
+  }
+  if (input.selectEdge && nav.hover >= 0) {
+    const it = nav.items[nav.hover];
+    ping(880, 0.16, 'sine', 0.10);
+    if (input.hapticR) input.hapticR(0.4, 45);
+    if (it.kind === 'poi') {
+      nav.waypoint = { x: it.ref.x, z: it.ref.z, type: it.ref.type };
+      toast('WAYPOINT SET · ' + it.ref.type.id);
+    } else if (it.kind === 'planet') {
+      nav.target = it.ref;
+      toast('DESTINATION: ' + it.label.replace(' · YOU ARE HERE', ''));
+    } else {
+      nav.viewStar = it.ref; nav.mode = M_SYSTEM;   // drill into that star's planets
+      toast('SYSTEM: ' + it.label + ' · PICK A PLANET');
+    }
+    hud.dirty = true;
+  }
+  input.selectEdge = false;
+}
+
+/* Points of interest in the world: a light column you can see from far off. */
+function updatePOIs(dt) {
+  for (const p of nav.pois) {
+    if (p.found) continue;
+    const d = Math.hypot(p.x - camPos[0], p.z - camPos[2]);
+    if (d < 9 && Math.abs(camPos[1] - p.y) < 14) {
+      p.found = true;
+      nav.charge = Math.min(100, nav.charge + p.type.charge);
+      give(p.type.res, p.type.amt);
+      hud.discovered++; stats.salvaged++;
+      mission.dirty = true;
+      toast('SALVAGED ' + p.type.id + '  +' + p.type.charge + '% WARP');
+      ping(520, 0.5, 'triangle', 0.16);
+      setTimeout(() => ping(780, 0.6, 'sine', 0.12), 150);
+      if (input.hapticR) input.hapticR(0.8, 140);
+      for (let i = 0; i < 40; i++) {
+        emit([p.x, p.y + 1, p.z],
+             [(Math.random() - 0.5) * 7, Math.random() * 8, (Math.random() - 0.5) * 7],
+             p.type.col, 0.8 + Math.random() * 0.7, 26, 0);
+      }
+      if (nav.waypoint && Math.hypot(nav.waypoint.x - p.x, nav.waypoint.z - p.z) < 3) {
+        nav.waypoint = null;
+        setTimeout(() => { if (!nav.waypoint) setCourseToNearest(true); }, 2600);
+      }
+      hud.dirty = true;
+    }
+  }
+}
+
+/* Course guidance: always keep a destination, and make it obvious where it is. */
+function setCourseToNearest(announce) {
+  let best = null, bestD = 1e9;
+  for (const p of nav.pois) {
+    if (p.found) continue;
+    const d = Math.hypot(p.x - camPos[0], p.z - camPos[2]);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  if (!best) {
+    if (announce) toast('ALL SITES ON THIS WORLD SALVAGED · WARP ONWARD');
+    nav.waypoint = null;
+    return false;
+  }
+  nav.waypoint = { x: best.x, z: best.z, type: best.type };
+  if (announce) { toast('COURSE SET · ' + best.type.id + ' · ' + Math.round(bestD) + ' m'); ping(760, 0.2, 'sine', 0.1); }
+  hud.dirty = true;
+  return true;
+}
+
+function guideInfo() {
+  if (!nav.waypoint) return null;
+  const dx = nav.waypoint.x - camPos[0], dz = nav.waypoint.z - camPos[2];
+  const dist = Math.hypot(dx, dz);
+  return { dx, dz, dist, dir: [dx / (dist || 1), 0, dz / (dist || 1)], type: nav.waypoint.type };
+}
+
+// A lit path of pips along the ground plus a chevron in front of the player.
+function renderGuide(VP, cam) {
+  const g = guideInfo();
+  if (!g) return;
+  const P = world.planet;
+  const col = g.type.col;
+  objUnlit = 1;
+  // Drawn without depth testing: over a ridge or through a hill, the route is
+  // always readable. Navigation clarity beats correct occlusion here.
+  gl.disable(gl.DEPTH_TEST);
+  useProg(progObj, VP, cam);
+
+  if (g.dist > 8) {
+    const span = Math.min(g.dist - 4, 130);
+    const n = 12, step = span / n;
+    for (let i = 1; i <= n; i++) {
+      const t = i * step;
+      const x = cam[0] + g.dir[0] * t, z = cam[2] + g.dir[2] * t;
+      const y = Math.max(P.height(x, z), P.waterLevel) + 1.5 + Math.sin(t_now * 3 - i * 0.5) * 0.18;
+      const s = 0.22 + 0.06 * Math.sin(t_now * 3 - i * 0.5);
+      M4.compose(tmpC, [0, 0, 0, 1], [x, y, z], [s, s * 1.7, s]);
+      drawObject(orbMesh, tmpC, col, 1.1, 0.6 - i * 0.025, false, 0, 0);
+    }
+  }
+
+  // Chevron floating ahead of the head, always pointing at the destination.
+  const anchor = [cam[0] + g.dir[0] * 2.1, cam[1] - 0.40, cam[2] + g.dir[2] * 2.1];
+  M4.aim(tmpC, anchor, [g.dir[0], 0, g.dir[2]], [0, 1, 0]);
+  const w = 0.15, l = 0.30;
+  tmpC[0] *= w; tmpC[1] *= w; tmpC[2] *= w;
+  tmpC[4] *= w * 0.45; tmpC[5] *= w * 0.45; tmpC[6] *= w * 0.45;
+  tmpC[8] *= l; tmpC[9] *= l; tmpC[10] *= l;
+  drawObject(chevronMesh, tmpC, col, 1.15, 0.9, false, 0, 0);
+  gl.enable(gl.DEPTH_TEST);
+  objUnlit = 0;
+}
+
+function renderNavWorld(VP, cam) {
+  // Beacons over unsalvaged sites, plus the active waypoint.
+  const cols = [];
+  for (const p of nav.pois) {
+    if (p.found) continue;
+    const d = Math.hypot(p.x - cam[0], p.z - cam[2]);
+    if (d > 1700) continue;
+    cols.push({ x: p.x, y: p.y, z: p.z, col: p.type.col, a: clamp(1 - d / 1700, 0.15, 0.55) });
+  }
+  if (nav.waypoint) {
+    cols.push({ x: nav.waypoint.x, y: world.planet.height(nav.waypoint.x, nav.waypoint.z),
+                z: nav.waypoint.z, col: [0.4, 1.0, 0.9], a: 0.75 });
+  }
+  if (!ship.piloting) {     // your ride always has a landing beacon over it
+    cols.push({ x: ship.pos[0], y: ship.pos[1], z: ship.pos[2], col: SHIP_MARK.col, a: 0.6 });
+  }
+  if (!cols.length) return;
+  useProg(progObj, VP, cam);
+  for (const c of cols) {
+    M4.aim(tmpC, [c.x, c.y, c.z], [0, 1, 0], [0, 0, 1]);
+    const w = 0.5;
+    tmpC[0] *= w; tmpC[1] *= w; tmpC[2] *= w;
+    tmpC[4] *= w; tmpC[5] *= w; tmpC[6] *= w;
+    tmpC[8] *= 110; tmpC[9] *= 110; tmpC[10] *= 110;
+    drawObject(beamMesh, tmpC, c.col, 1.0, c.a, false, 0, 0);
+  }
+}
+
+/* --- mission log: a readable holographic sheet, not 3-D geometry --------- */
+const mission = { canvas: document.createElement('canvas'), tex: gl.createTexture(), dirty: true, acc: 0 };
+mission.canvas.width = 720; mission.canvas.height = 470;
+mission.ctx = mission.canvas.getContext('2d');
+gl.bindTexture(gl.TEXTURE_2D, mission.tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+function drawMission() {
+  const c = mission.ctx, W = mission.canvas.width, H = mission.canvas.height;
+  const P = world.planet, accent = rgbCss(P.glow, 1);
+  c.clearRect(0, 0, W, H);
+  c.fillStyle = 'rgba(4,16,28,0.44)'; c.fillRect(0, 0, W, H);
+  for (let sy = 0; sy < H; sy += 4) { c.fillStyle = 'rgba(140,215,255,0.028)'; c.fillRect(0, sy, W, 1); }
+  c.strokeStyle = 'rgba(120,225,255,0.65)'; c.lineWidth = 1.5; c.strokeRect(6, 6, W - 12, H - 12);
+  c.fillStyle = 'rgba(120,225,255,0.09)'; c.fillRect(6, 6, W - 12, 56);
+  c.beginPath(); c.moveTo(6, 62); c.lineTo(W - 6, 62); c.stroke();
+  c.fillStyle = 'rgba(150,240,255,0.95)'; c.font = '600 27px Consolas, monospace';
+  c.fillText('MISSION LOG', 22, 43);
+  c.font = '15px Consolas, monospace'; c.fillStyle = 'rgba(180,225,255,0.7)';
+  c.textAlign = 'right';
+  c.fillText(getSystem(nav.curStar).name + ' · ' + P.name.toUpperCase(), W - 22, 42);
+  c.textAlign = 'left';
+
+  let y = 92;
+  for (const g of GOALS) {
+    const v = Math.min(g.get(), g.target), done = v >= g.target;
+    const active = !done && currentGoal() === g;
+    c.fillStyle = done ? 'rgba(90,240,170,0.95)' : active ? accent : 'rgba(140,180,210,0.45)';
+    c.font = '600 19px Consolas, monospace';
+    c.fillText(done ? '✔' : active ? '▶' : '·', 24, y);
+    c.fillStyle = done ? 'rgba(150,255,205,0.8)' : active ? 'rgba(235,250,255,0.98)' : 'rgba(160,195,220,0.55)';
+    c.font = (active ? '600 19px' : '19px') + ' Consolas, monospace';
+    c.fillText(g.label, 52, y);
+    if (!done) {
+      c.textAlign = 'right';
+      c.fillStyle = 'rgba(190,225,250,0.75)';
+      c.font = '17px Consolas, monospace';
+      c.fillText(Math.floor(v) + ' / ' + g.target, W - 26, y);
+      c.textAlign = 'left';
+    }
+    y += 34;
+  }
+
+  const g = currentGoal();
+  c.fillStyle = 'rgba(120,225,255,0.12)'; c.fillRect(18, y + 4, W - 36, 92);
+  c.fillStyle = accent; c.font = '600 16px Consolas, monospace';
+  c.fillText('NEXT', 30, y + 28);
+  c.fillStyle = 'rgba(225,245,255,0.95)'; c.font = '17px Consolas, monospace';
+  const hint = g ? g.hint : 'All objectives complete — the galaxy is yours.';
+  const words = hint.split(' ');
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    if ((line + w).length > 54) { lines.push(line); line = ''; }
+    line += w + ' ';
+  }
+  lines.push(line);
+  lines.slice(0, 3).forEach((ln, i) => c.fillText(ln, 30, y + 52 + i * 22));
+
+  const gi = guideInfo();
+  c.font = '17px Consolas, monospace';
+  c.fillStyle = gi ? rgbCss(gi.type.col, 0.95) : 'rgba(150,190,220,0.5)';
+  c.fillText(gi ? '◈ COURSE: ' + gi.type.id + '  ·  ' + Math.round(gi.dist) + ' m'
+                : 'no course set', 26, H - 50);
+  c.fillStyle = 'rgba(150,200,235,0.6)'; c.font = '15px Consolas, monospace';
+  c.fillText('TRIGGER: set course to nearest site   ·   LEFT X: next map', 26, H - 24);
+
+  gl.bindTexture(gl.TEXTURE_2D, mission.tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, mission.canvas);
+  mission.dirty = false;
+}
+
+// Held like a pamphlet: fixed to the hand's own frame, laid back off the palm,
+// so it moves and tilts with your wrist instead of chasing your head.
+function panelModel() {
+  const s = nav.anim;
+  const local = trs([0, 0.055, -0.075], [-1.05, 0, 0], [0.30 * s, 0.196 * s, 1]);
+  if (input.gripL) return M4.mul(navModelM, input.gripL, local);
+  return M4.mul(navModelM, camMat, M4.mul(navTmp, trs([0, -0.30, -0.72], [0.5, 0, 0], [1, 1, 1]), local));
+}
+
+function renderNav(VP, cam) {
+  if (nav.anim < 0.01) return;
+
+  if (nav.mode === M_MISSION) {
+    mission.acc += 0.016;
+    if (mission.dirty || mission.acc > 0.25) { mission.acc = 0; drawMission(); }
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    const uu = useProg(progUI, VP, cam);
+    gl.uniformMatrix4fv(uu.uModel, false, panelModel());
+    gl.uniform1f(uu.uAlpha, nav.anim);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, mission.tex);
+    gl.uniform1i(uu.uTex, 0);
+    drawMesh(uiQuad);
+    gl.depthMask(true);
+    return;
+  }
+
+  const model = mapModel();
+  const a = nav.anim;
+
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.depthMask(false);
+  const uh = useProg(progHolo, VP, cam);
+  gl.uniform1f(uh.uAlpha, a);
+
+  if (nav.mode === M_SURFACE && nav.holo) {
+    gl.uniformMatrix4fv(uh.uModel, false, model);
+    gl.uniform1f(uh.uGrid, 1);
+    drawMesh(nav.holo);
+  } else if (nav.mode === M_SYSTEM) {
+    const sys = getSystem(nav.viewStar);
+    useProg(progObj, VP, cam);
+    for (const pl of sys.planets) {                    // orbit rings
+      M4.mul(navTmp, model, trs([0, 0, 0], [0, 0, 0], [pl.orbit, pl.orbit, pl.orbit]));
+      drawObject(ringMesh, navTmp, [0.34, 0.76, 0.96], 1.0, a * 0.55, false, 0, 0);
+    }
+  }
+
+  // Items: planets, stars, site markers.
+  const up = useProg(progPts, VP, cam);
+  gl.uniform1f(up.uScale, 0.48);
+  gl.uniform1f(up.uFade, 0.0);
+  if (nav.mode === M_GALAXY && nav.galaxyPts) {
+    gl.uniformMatrix4fv(up.uModel, false, model);
+    gl.bindVertexArray(nav.galaxyPts.vao);
+    gl.drawArrays(gl.POINTS, 0, nav.galaxyPts.count);
+  }
+
+  useProg(progObj, VP, cam);
+
+  // Dotted, pulsating jump route from where you are to what you are pointing at.
+  if (nav.mode === M_GALAXY) {
+    const from = nav.galaxy[nav.curStar].pos;
+    const routes = [];
+    if (nav.hover >= 0 && nav.items[nav.hover].ref !== nav.curStar) routes.push({ to: nav.items[nav.hover].pos, c: [0.55, 1.0, 1.0], b: 1.0 });
+    if (nav.target && nav.target.star !== nav.curStar) routes.push({ to: nav.galaxy[nav.target.star].pos, c: [1.0, 0.78, 0.35], b: 0.75 });
+    for (const rt of routes) {
+      const d = V3.sub(rt.to, from), len = V3.len(d);
+      const n = Math.max(8, Math.min(40, Math.round(len * 42)));
+      for (let k = 1; k < n; k++) {
+        const t = k / n;
+        const p = V3.add(from, V3.scale(d, t));
+        p[1] += Math.sin(t * Math.PI) * len * 0.10;          // gentle arc
+        const pulse = 0.35 + 0.65 * Math.max(0, Math.sin(t * 12 - t_now * 5));
+        const s = 0.006 + 0.004 * pulse;
+        M4.mul(navTmp, model, trs(p, [0, 0, 0], [s, s, s]));
+        drawObject(orbMesh, navTmp, rt.c, 1.3, a * rt.b * pulse * 0.85, false, 0, 0);
+      }
+    }
+  }
+
+  for (let i = 0; i < nav.items.length; i++) {
+    const it = nav.items[i];
+    const hovered = i === nav.hover;
+    const s = (it.kind === 'planet' ? it.size : it.kind === 'poi' ? 0.052 : 0.024) * (hovered ? 1.6 : 1);
+    if (it.kind === 'star' && !hovered && !it.here) continue;   // drawn as points
+    const uncharted = it.seen === false;
+    M4.mul(navTmp, model, trs(it.pos, [0, 0, 0], [s, s, s]));
+    drawObject(orbMesh, navTmp, it.col,
+               uncharted ? (hovered ? 0.75 : 0.40) : (hovered ? 1.35 : 0.80),
+               a * (hovered ? 1 : uncharted ? 0.6 : 0.9), false, 0, 0);
+    if (it.here || hovered) {
+      const rs = s * 2.6;
+      M4.mul(navTmp, model, trs(it.pos, [0, t_now * (hovered ? 1.5 : 0.5), 0], [rs, rs, rs]));
+      drawObject(ringMesh, navTmp, hovered ? [0.6, 1, 1] : [1, 0.8, 0.35], 1.6, a * 0.8, false, 0, 0);
+    }
+  }
+  if (nav.mode === M_SYSTEM) {                          // the star itself
+    const sys = getSystem(nav.viewStar);
+    M4.mul(navTmp, model, trs([0, 0, 0], [0, 0, 0], [0.095, 0.095, 0.095]));
+    drawObject(orbMesh, navTmp, sys.star.cls.col, 2.6, a, false, 0, 0);
+  }
+  if (nav.mode === M_SURFACE) {                         // "you are here"
+    M4.mul(navTmp, model, trs([0, 0.11, 0], [Math.PI, t_now * 0.9, 0], [0.06, 0.10, 0.06]));
+    drawObject(markerMesh, navTmp, [1, 0.85, 0.3], 2.0, a, false, 0, 0);
+    if (nav.waypoint) {
+      const l = holoLocal(nav.waypoint.x, nav.waypoint.z);
+      M4.mul(navTmp, model, trs([l[0], 0.16, l[2]], [Math.PI, -t_now * 1.4, 0], [0.05, 0.08, 0.05]));
+      drawObject(markerMesh, navTmp, [0.4, 1, 0.9], 2.0, a, false, 0, 0);
+    }
+  }
+
+  // Pointer beam from the multi-tool while the map is up.
+  if (input.aimMat && nav.hover >= 0) {
+    const o = M4.xform(input.aimMat, [0, 0.02, 0.34]);
+    const target = M4.xform(model, nav.items[nav.hover].pos);
+    const dir = V3.sub(target, o), len = V3.len(dir);
+    M4.aim(tmpC, o, dir, [0, 1, 0]);
+    const w = 0.004;
+    tmpC[0] *= w; tmpC[1] *= w; tmpC[2] *= w;
+    tmpC[4] *= w; tmpC[5] *= w; tmpC[6] *= w;
+    tmpC[8] *= len; tmpC[9] *= len; tmpC[10] *= len;
+    drawObject(beamMesh, tmpC, [0.5, 1.0, 1.0], 1.6, 0.7, false, 0, 0);
+  }
+  gl.depthMask(true);
+}
+
+/* ================================================= world-space markers === */
+/* Diamond icons over anything worth walking to, and a name card on whatever
+   is nearest the centre of your view — the thing you are actually looking at. */
+const MARK_MAX = 64;
+const marks = {
+  buf: new Float32Array(MARK_MAX * 7), list: [], count: 0, mesh: null,
+  focus: null, focusKey: '', acc: 0,
+  canvas: document.createElement('canvas'), tex: gl.createTexture(),
+};
+marks.canvas.width = 512; marks.canvas.height = 128;
+marks.ctx = marks.canvas.getContext('2d');
+gl.bindTexture(gl.TEXTURE_2D, marks.tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+(function initMarkVAO() {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, marks.buf.byteLength, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 28, 0);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 28, 12);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 24);
+  gl.bindVertexArray(null);
+  marks.mesh = { vao, vb };
+})();
+
+function drawMarkLabel(title, sub, col) {
+  const c = marks.ctx, W = marks.canvas.width, H = marks.canvas.height;
+  c.clearRect(0, 0, W, H);
+  c.fillStyle = 'rgba(4,14,24,0.55)';
+  c.fillRect(30, 26, W - 44, 74);
+  c.strokeStyle = rgbCss(col, 0.85); c.lineWidth = 2;
+  c.beginPath(); c.moveTo(30, 26); c.lineTo(30, 100); c.stroke();
+  c.fillStyle = rgbCss(col, 1); c.font = '600 34px Consolas, monospace';
+  c.fillText(title, 46, 62);
+  c.fillStyle = 'rgba(215,240,255,0.85)'; c.font = '25px Consolas, monospace';
+  c.fillText(sub, 46, 92);
+  gl.bindTexture(gl.TEXTURE_2D, marks.tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, marks.canvas);
+}
+
+// Rebuilt a few times a second, not every frame — the contents barely change.
+function updateMarks() {
+  const P = world.planet, list = [];
+  for (const p of nav.pois) {
+    if (p.found) continue;
+    const d = Math.hypot(p.x - camPos[0], p.z - camPos[2]);
+    if (d < 2200) list.push({ pos: [p.x, p.y + 3.5, p.z], col: p.type.col, size: 26, title: p.type.id, sub: Math.round(d) + ' m' });
+  }
+  if (!ship.piloting) {
+    const d = Math.hypot(ship.pos[0] - camPos[0], ship.pos[2] - camPos[2]);
+    list.push({ pos: [ship.pos[0], ship.pos[1] + 4.5, ship.pos[2]], col: SHIP_MARK.col, size: 30, title: 'STARSHIP', sub: Math.round(d) + ' m' });
+  }
+  // Nearby harvestables, labelled by the element they yield.
+  const cx = Math.floor(camPos[0] / CHUNK), cz = Math.floor(camPos[2] / CHUNK);
+  outer:
+  for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+    const ch = world.chunks.get(chunkKey(cx + i, cz + j));
+    if (!ch) continue;
+    for (const cfg of P.props) {
+      if (cfg.key === 'grass' || cfg.key === 'rock') continue;
+      const arr = ch.props[cfg.key];
+      for (let k = 0; k < arr.length; k += 12) {
+        const d = Math.hypot(arr[k] - camPos[0], arr[k + 2] - camPos[2]);
+        if (d > 70) continue;
+        list.push({
+          pos: [arr[k], arr[k + 1] + 1.6 + arr[k + 3] * 0.5, arr[k + 2]],
+          col: RESOURCES[cfg.res].col, size: 17,
+          title: RESOURCES[cfg.res].label.toUpperCase(), sub: Math.round(d) + ' m',
+        });
+        if (list.length >= MARK_MAX) break outer;
+      }
+    }
+  }
+  marks.list = list.slice(0, MARK_MAX);
+  let n = 0;
+  for (const m of marks.list) {
+    marks.buf.set([m.pos[0], m.pos[1], m.pos[2], m.col[0], m.col[1], m.col[2], m.size], n * 7);
+    n++;
+  }
+  marks.count = n;
+  if (n) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, marks.mesh.vb);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, marks.buf, 0, n * 7);
+  }
+}
+
+// Whichever marker is closest to the centre of view gets its name card.
+function pickFocus() {
+  const f = V3.norm([-camMat[8], -camMat[9], -camMat[10]]);
+  let best = null, bestDot = 0.975;
+  for (const m of marks.list) {
+    const v = V3.sub(m.pos, camPos), len = V3.len(v);
+    if (len < 0.5) continue;
+    const dot = V3.dot(V3.scale(v, 1 / len), f);
+    if (dot > bestDot) { bestDot = dot; best = m; }
+  }
+  marks.focus = best;
+  if (best) {
+    // Distance changes constantly; redraw the card at most a few times a second
+    // so this never becomes a per-frame texture upload.
+    const key = best.title + '|' + best.sub;
+    const now = t_now;
+    if (key !== marks.focusKey && (best.title !== marks.focusTitle || now - (marks.labelT || 0) > 0.2)) {
+      marks.focusKey = key; marks.focusTitle = best.title; marks.labelT = now;
+      drawMarkLabel(best.title, best.sub, best.col);
+    }
+  } else { marks.focusKey = ''; marks.focusTitle = ''; }
+}
+
+function billboard(out, pos, w, h) {
+  const r = V3.norm([camMat[0], camMat[1], camMat[2]]);
+  const u = V3.norm([camMat[4], camMat[5], camMat[6]]);
+  const f = V3.cross(r, u);
+  out[0] = r[0] * w; out[1] = r[1] * w; out[2] = r[2] * w; out[3] = 0;
+  out[4] = u[0] * h; out[5] = u[1] * h; out[6] = u[2] * h; out[7] = 0;
+  out[8] = f[0]; out[9] = f[1]; out[10] = f[2]; out[11] = 0;
+  out[12] = pos[0]; out[13] = pos[1]; out[14] = pos[2]; out[15] = 1;
+  return out;
+}
+
+function renderMarks(VP, cam) {
+  if (!marks.count) return;
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.depthMask(false);
+  gl.disable(gl.DEPTH_TEST);
+  const up = useProg(progPts, VP, cam);
+  gl.uniformMatrix4fv(up.uModel, false, M4.ident());
+  gl.uniform1f(up.uScale, 1.0);
+  gl.uniform1f(up.uFade, 0.0);
+  gl.uniform1f(up.uFixed, 1.0);
+  gl.uniform1f(up.uShape, 1.0);
+  gl.bindVertexArray(marks.mesh.vao);
+  gl.drawArrays(gl.POINTS, 0, marks.count);
+  gl.uniform1f(up.uShape, 0.0);
+  gl.uniform1f(up.uFixed, 0.0);
+
+  if (marks.focus) {
+    const d = Math.max(V3.len(V3.sub(marks.focus.pos, cam)), 1.2);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    const uu = useProg(progUI, VP, cam);
+    const p = V3.add(marks.focus.pos, [0, d * 0.030, 0]);
+    gl.uniformMatrix4fv(uu.uModel, false, billboard(navTmp, p, d * 0.19, d * 0.0475));
+    gl.uniform1f(uu.uAlpha, 0.95);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, marks.tex);
+    gl.uniform1i(uu.uTex, 0);
+    drawMesh(uiQuad);
+  }
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthMask(true);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+}
+
+/* ======================================================== starship ======= */
+const SHIP_MARK = { id: 'STARSHIP', col: [0.45, 0.90, 1.00], charge: 0, res: 'ferrite', amt: 0 };
+const ATMO_TOP = 700, ORBIT_ALT = 1800;
+const SHIP_REST = 2.3;   // origin height when standing on its landing struts
+
+const ship = {
+  pos: [0, 0, 0], vel: [0, 0, 0], aim: [0, 0, 1],
+  piloting: false, alt: 0, orbit: false, throttle: 0, mesh: null,
+};
+
+/* Cockpit sits at the origin and is left empty, so from the pilot's seat you
+   see nose, wings and engines around you rather than the inside of a box. */
+function makeShipMesh(P) {
+  const m = G();
+  const hull = mix3([0.40, 0.44, 0.50], P.glow, 0.14);
+  const dark = [0.13, 0.15, 0.19];
+  const trim = P.glow;
+  // The pilot's eye sits at roughly +0.45; the whole airframe hangs below that
+  // so the view forward is clear and you see the nose sloping away.
+  add(m, prim.cyl(0.50, 0.09, 3.1, 7), trs([0, -1.00, 1.05], [Math.PI / 2, 0, 0], [1, 1, 1]), hull);
+  add(m, prim.box(1.4, 0.28, 1.6), trs([0, -1.30, 0.45], [0, 0, 0], [1, 1, 1]), dark);
+  // canopy frame around the pilot
+  for (const s of [-1, 1]) {
+    add(m, prim.box(0.09, 0.13, 2.0), trs([s * 0.66, -0.28, 0.25], [0.12, 0, s * 0.10], [1, 1, 1]), dark);
+    add(m, prim.box(0.08, 0.85, 0.11), trs([s * 0.64, -1.02, 1.30], [-0.38, 0, 0], [1, 1, 1]), dark);
+  }
+  // wings
+  for (const s of [-1, 1]) {
+    add(m, prim.box(2.6, 0.16, 1.5), trs([s * 1.9, -1.22, -0.35], [0, 0, s * 0.16], [1, 1, 1]), hull);
+    add(m, prim.box(0.5, 0.14, 0.9), trs([s * 3.0, -1.10, -0.45], [0, 0, s * 0.40], [1, 1, 1]), trim);
+    // engines
+    add(m, prim.cyl(0.34, 0.30, 1.9, 8), trs([s * 1.5, -1.20, -1.9], [Math.PI / 2, 0, 0], [1, 1, 1]), dark);
+    add(m, prim.cyl(0.27, 0.27, 0.16, 8), trs([s * 1.5, -1.20, -1.95], [Math.PI / 2, 0, 0], [1, 1, 1]), trim);
+  }
+  // spine + tail
+  add(m, prim.box(0.7, 0.34, 2.3), trs([0, -1.32, -1.6], [0, 0, 0], [1, 1, 1]), hull);
+  add(m, prim.box(0.16, 1.0, 0.9), trs([0, -1.05, -2.4], [-0.25, 0, 0], [1, 1, 1]), trim);
+  // landing struts
+  for (const s of [-1, 1])
+    add(m, prim.cyl(0.09, 0.07, 0.95, 5), trs([s * 1.1, -1.45, -0.5], [Math.PI, 0, s * 0.16], [1, 1, 1]), dark);
+  return faceted(m);
+}
+
+function placeShip(P) {
+  const px = player.pos[0], pz = player.pos[2];
+  let bx = px + 26, bz = pz + 8;
+  for (let i = 0; i < 60; i++) {                 // find flat ground nearby
+    const a = i * 2.399, d = 18 + i * 0.9;
+    const x = px + Math.cos(a) * d, z = pz + Math.sin(a) * d;
+    const h = P.height(x, z);
+    const slope = Math.hypot(P.height(x + 2, z) - P.height(x - 2, z), P.height(x, z + 2) - P.height(x, z - 2));
+    if (h > P.waterLevel + 2 && slope < 2.5) { bx = x; bz = z; break; }
+  }
+  ship.pos = [bx, P.height(bx, bz) + SHIP_REST, bz];
+  ship.vel = [0, 0, 0]; ship.aim = [0, 0, 1];
+  ship.piloting = false; ship.alt = 0; ship.orbit = false; ship.throttle = 0;
+  disposeMesh(ship.mesh);
+  ship.mesh = makeMesh(makeShipMesh(P));
+}
+
+// Call the ship down to a clear patch of ground beside you.
+function summonShip() {
+  const P = world.planet;
+  let lx = camPos[0] + 11, lz = camPos[2] + 4;
+  for (let i = 0; i < 40; i++) {
+    const a = i * 2.399, d = 9 + (i % 7);      // always lands within boarding range
+    const x = camPos[0] + Math.cos(a) * d, z = camPos[2] + Math.sin(a) * d;
+    const h = P.height(x, z);
+    const slope = Math.hypot(P.height(x + 2, z) - P.height(x - 2, z), P.height(x, z + 2) - P.height(x, z - 2));
+    if (h > P.waterLevel + 1.5 && slope < 3) { lx = x; lz = z; break; }
+  }
+  ship.summon = { from: ship.pos.slice(), to: [lx, P.height(lx, lz) + SHIP_REST, lz], t: 0 };
+  toast('STARSHIP INBOUND');
+  ping(300, 0.5, 'triangle', 0.13);
+  setTimeout(() => ping(460, 0.6, 'sine', 0.10), 220);
+  hud.dirty = true;
+}
+
+function toggleShip() {
+  const P = world.planet;
+  if (ship.piloting) {
+    const gh = P.height(ship.pos[0], ship.pos[2]);
+    if (ship.pos[1] - gh > 16) { toast('TOO HIGH TO DISEMBARK · DESCEND FIRST'); ping(170, 0.25, 'square', 0.1); return; }
+    ship.piloting = false;
+    ship.pos[1] = gh + SHIP_REST; ship.vel = [0, 0, 0]; ship.throttle = 0;
+    player.pos = [ship.pos[0] + 5, P.height(ship.pos[0] + 5, ship.pos[2]), ship.pos[2]];
+    player.vy = 0;
+    toast('DISEMBARKED');
+    ping(320, 0.3, 'sine', 0.12);
+  } else {
+    const d = Math.hypot(ship.pos[0] - camPos[0], ship.pos[2] - camPos[2]);
+    if (d > 25) { summonShip(); return; }   // never make the player hunt for it
+    ship.piloting = true;
+    ship.pos[1] = P.height(ship.pos[0], ship.pos[2]) + SHIP_REST;
+    stats.boarded = 1;
+    toast('LAUNCH · RIGHT TRIGGER = THRUST · POINT TO STEER');
+    ping(520, 0.4, 'triangle', 0.14);
+    mission.dirty = true;
+  }
+  hud.dirty = true;
+}
+
+function updateShip(dt) {
+  const P = world.planet;
+  if (!ship.piloting) {
+    if (ship.summon) {
+      const s = ship.summon;
+      s.t = Math.min(1, s.t + dt / 3.4);
+      const e = smooth(s.t);
+      const x = lerp(s.from[0], s.to[0], e), z = lerp(s.from[2], s.to[2], e);
+      const gh = P.height(x, z) + SHIP_REST;
+      ship.pos = [x, Math.max(gh, lerp(s.from[1], s.to[1], e)) + Math.sin(e * Math.PI) * 55, z];
+      const d = V3.sub(s.to, s.from);
+      if (Math.hypot(d[0], d[2]) > 1) ship.aim = V3.norm([d[0], -0.15, d[2]]);
+      ship.throttle = 1 - e * 0.6;
+      if (Math.random() < 0.6) {
+        emit([ship.pos[0], ship.pos[1] - 0.5, ship.pos[2]],
+             [(Math.random() - 0.5) * 5, -6 - Math.random() * 6, (Math.random() - 0.5) * 5],
+             [0.55, 0.85, 1.0], 0.5, 22, 0);
+      }
+      if (s.t >= 1) {
+        ship.summon = null; ship.pos = s.to.slice(); ship.throttle = 0;
+        toast('STARSHIP LANDED · PRESS RIGHT B TO BOARD');
+        ping(660, 0.4, 'sine', 0.12);
+      }
+      ship.alt = 0; ship.orbit = false;
+      return;
+    }
+    ship.pos[1] = P.height(ship.pos[0], ship.pos[2]) + SHIP_REST;
+    ship.alt = 0; ship.orbit = false;
+    return;
+  }
+  // Point-to-fly: the ship follows where your right hand points. Comfortable
+  // in VR because the player's frame never rolls or pitches.
+  const m = input.aimMat;
+  if (m) {
+    const a = M4.xform(m, [0, 0.02, 0.34]), b = M4.xform(m, [0, 0.02, 1.34]);
+    const dir = V3.norm(V3.sub(b, a));
+    const k = Math.min(1, dt * 3.2);
+    ship.aim = V3.norm(V3.add(V3.scale(ship.aim, 1 - k), V3.scale(dir, k)));
+  }
+  ship.throttle += (input.trigger - ship.throttle) * Math.min(1, dt * 5);
+
+  const inSpace = spaceMix > 0.55;
+  const accel = inSpace ? 140 : 66;
+  ship.vel = V3.add(ship.vel, V3.scale(ship.aim, ship.throttle * accel * dt));
+
+  // Left stick climbs / strafes, left grip brakes.
+  ship.vel[1] += -input.moveZ * 26 * dt;
+  const rightV = V3.norm(V3.cross(ship.aim, [0, 1, 0]));
+  ship.vel = V3.add(ship.vel, V3.scale(rightV, input.moveX * 20 * dt));
+  if (input.sprint > 0.5) ship.vel = V3.scale(ship.vel, Math.max(0, 1 - 2.6 * dt));
+
+  ship.vel = V3.scale(ship.vel, Math.max(0, 1 - (inSpace ? 0.05 : 0.5) * dt));
+  if (!inSpace) ship.vel[1] -= P.gravity * 0.32 * dt * (1 - ship.throttle * 0.85);
+
+  const spd = V3.len(ship.vel), maxS = inSpace ? 900 : 200;
+  if (spd > maxS) ship.vel = V3.scale(ship.vel, maxS / spd);
+  ship.pos = V3.add(ship.pos, V3.scale(ship.vel, dt));
+
+  const gh = P.height(ship.pos[0], ship.pos[2]) + SHIP_REST;
+  if (ship.pos[1] < gh) {
+    ship.pos[1] = gh;
+    if (ship.vel[1] < 0) ship.vel[1] = 0;
+    ship.vel[0] *= 0.86; ship.vel[2] *= 0.86;
+  }
+  ship.alt = ship.pos[1] - P.height(ship.pos[0], ship.pos[2]);
+  const wasOrbit = ship.orbit;
+  ship.orbit = ship.alt > ORBIT_ALT;
+  if (ship.orbit && !wasOrbit) {
+    stats.orbits = 1; mission.dirty = true;
+    toast('ORBIT ACHIEVED · OPEN NAV AND SELECT A DESTINATION');
+    ping(880, 0.6, 'sine', 0.14);
+    setTimeout(() => ping(1180, 0.7, 'triangle', 0.10), 200);
+  }
+
+  // Engine wash
+  if (ship.throttle > 0.15 && !inSpace) {
+    for (let i = 0; i < 2; i++) {
+      const s = i ? 1 : -1;
+      const back = V3.add(ship.pos, V3.scale(ship.aim, -2.6));
+      emit([back[0] + s * 1.4, back[1] - 0.4, back[2]],
+           V3.scale(ship.aim, -18 - Math.random() * 25),
+           [0.55, 0.85, 1.0], 0.35, 24, 0);
+    }
+  }
+  player.pos = [ship.pos[0], ship.pos[1] - 1.25, ship.pos[2]];
+  player.vy = 0; player.grounded = false;
+}
+
+function renderShip(VP, cam) {
+  if (!ship.mesh) return;
+  useProg(progObj, VP, cam);
+  M4.aim(tmpC, ship.pos, ship.aim, [0, 1, 0]);
+  drawObject(ship.mesh, tmpC, [1, 1, 1], ship.throttle * 0.10, 1, true, 0, 0);
+  if (!ship.piloting) return;
+  // engine glow
+  objUnlit = 1;
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.depthMask(false);
+  useProg(progObj, VP, cam);
+  for (const s of [-1, 1]) {
+    const p = M4.xform(tmpC, [s * 1.5, -1.20, -2.05]);
+    const r = 0.30 + ship.throttle * 0.30 + Math.sin(t_now * 30) * 0.03;
+    M4.compose(navTmp, [0, 0, 0, 1], p, [r, r, r]);
+    drawObject(orbMesh, navTmp, [0.5, 0.85, 1.0], 1.1 + ship.throttle * 1.4, 0.75, false, 0, 0);
+  }
+  objUnlit = 0;
+  gl.depthMask(true);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+}
+
+/* --- warp: charge, tunnel, arrival ------------------------------------- */
+const warpFx = { phase: 0, t: 0, dest: null };
+
+function beginWarp(starIndex, planetIndex) {
+  if (!ship.piloting) { toast('BOARD YOUR STARSHIP TO WARP'); ping(160, 0.3, 'square', 0.12); return; }
+  if (!ship.orbit) {
+    toast('CLIMB TO ORBIT FIRST · ' + Math.round(ship.alt) + ' / ' + ORBIT_ALT + ' m');
+    ping(160, 0.3, 'square', 0.12); return;
+  }
+  const cost = starIndex !== nav.curStar ? 90 : 30;
+  if (nav.charge < cost) { toast('WARP CHARGE TOO LOW · NEED ' + cost + '%'); ping(160, 0.35, 'square', 0.12); return; }
+  warpFx.dest = { star: starIndex, planet: planetIndex };
+  warpFx.phase = 1; warpFx.t = 0;
+  nav.open = false;
+  toast('WARP DRIVE SPOOLING…');
+  if (audio.ctx) { ping(120, 1.5, 'sawtooth', 0.10); ping(240, 1.5, 'sine', 0.08); }
+}
+
+function updateWarp(dt) {
+  if (!warpFx.phase) return;
+  warpFx.t += dt;
+  if (warpFx.phase === 1) {
+    flash = Math.min(0.9, warpFx.t / 1.5);
+    flashCol = [0.55, 0.85, 1.0];
+    if (warpFx.t > 1.5) {
+      warpFx.phase = 2; warpFx.t = 0;
+      flash = 1; flashCol = [1, 1, 1];
+      if (audio.ctx) ping(1400, 2.2, 'sine', 0.12);
+    }
+  } else if (warpFx.phase === 2) {
+    flash = Math.max(0, 1 - warpFx.t * 2.2);
+    if (warpFx.t > 2.2) {
+      const d = warpFx.dest;
+      travelTo(d.star, d.planet);
+      const P = world.planet;
+      ship.pos = [player.pos[0], P.height(player.pos[0], player.pos[2]) + ORBIT_ALT + 700, player.pos[2]];
+      ship.vel = [0, 0, 0]; ship.piloting = true; ship.throttle = 0;
+      ship.alt = ORBIT_ALT + 700; ship.orbit = true;
+      warpFx.phase = 3; warpFx.t = 0;
+      flash = 1; flashCol = [1, 1, 1];
+    }
+  } else if (warpFx.phase === 3) {
+    flash = Math.max(0, 1 - warpFx.t * 1.4);
+    if (warpFx.t > 1.4) { warpFx.phase = 0; toast('ARRIVED IN ORBIT · DESCEND TO THE SURFACE'); }
+  }
+}
+
+// Star streaks rushing past during the jump.
+function renderWarpStreaks(VP, cam) {
+  if (warpFx.phase !== 2) return;
+  objUnlit = 1;
+  gl.disable(gl.DEPTH_TEST);
+  useProg(progObj, VP, cam);
+  M4.aim(tmpB, cam, ship.aim, [0, 1, 0]);
+  const speed = 260;
+  for (let i = 0; i < 54; i++) {
+    const a = i * 2.399, r = 1.6 + (i % 9) * 1.9;
+    const z = ((i * 37.7 + t_now * speed) % 220) - 90;
+    const p = M4.xform(tmpB, [Math.cos(a) * r, Math.sin(a) * r * 0.75, z]);
+    M4.aim(tmpC, p, ship.aim, [0, 1, 0]);
+    const w = 0.05, l = 14 + (i % 5) * 9;
+    tmpC[0] *= w; tmpC[1] *= w; tmpC[2] *= w;
+    tmpC[4] *= w; tmpC[5] *= w; tmpC[6] *= w;
+    tmpC[8] *= l; tmpC[9] *= l; tmpC[10] *= l;
+    drawObject(beamMesh, tmpC, [0.75, 0.90, 1.0], 1.3, 0.55, false, 0, 0);
+  }
+  gl.enable(gl.DEPTH_TEST);
+  objUnlit = 0;
+}
+
+/* =========================================================== bootstrap === */
+function boot() {
+  gl.enable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);          // blades and fronds are single-quad
+  gl.depthFunc(gl.LEQUAL);
+  gl.clearColor(0, 0, 0, 1);
+
+  // Build the galaxy first, then drop the player onto a real planet in it.
+  nav.galaxy = makeGalaxy();
+  nav.galaxyPts = makePointCloud(nav.galaxy.map(s => ({ pos: s.pos, col: s.cls.col, size: s.size })));
+  nav.curStar = nav.viewStar = (Math.random() * nav.galaxy.length) | 0;
+  const sys0 = getSystem(nav.curStar);
+  nav.curPlanet = (Math.random() * sys0.planets.length) | 0;
+  nav.visited.add(nav.curStar + ':' + nav.curPlanet);
+  newPlanet(sys0.planets[nav.curPlanet].seed);
+  drawHud();
+  setTimeout(() => toast('FOLLOW THE GLOWING PATH TO THE SITE'), 3200);
+
+  const msg = document.getElementById('msg');
+  const vrBtn = document.getElementById('vr');
+  if (navigator.xr) {
+    navigator.xr.isSessionSupported('immersive-vr').then(ok => {
+      if (ok) { vrBtn.disabled = false; msg.textContent = 'Headset detected — put it on and enter.'; }
+      else msg.textContent = 'No VR device here. Open this page in the Meta Quest browser to enter VR.';
+    }).catch(() => { msg.textContent = 'WebXR unavailable — desktop mode only.'; });
+  } else {
+    msg.textContent = 'This browser has no WebXR. Use the Meta Quest 3 browser for VR.';
+  }
+  vrBtn.addEventListener('click', startVR);
+  document.getElementById('flat').addEventListener('click', () => {
+    flatActive = true;
+    initAudio();
+    if (audio.ctx && audio.ctx.state === 'suspended') audio.ctx.resume();
+    tunePad(world.planet);
+    document.getElementById('ui').classList.add('hidden');
+    canvas.requestPointerLock();
+  });
+  addEventListener('keydown', e => {
+    if (e.code === 'Escape' && flatActive) document.getElementById('ui').classList.remove('hidden');
+  });
+
+  lastT = performance.now();
+  requestAnimationFrame(onFlatFrame);
+
+  // ?shot=<name> poses a deterministic scene for the capture script in tools/.
+  const shot = new URLSearchParams(location.search).get('shot');
+  if (shot) setupShot(shot);
+}
+
+function setupShot(id) {
+  document.getElementById('ui').classList.add('hidden');
+  document.getElementById('hud2d').style.display = 'none';
+  flatActive = false;
+
+  const seedFor = want => {
+    for (let s = 1; s < 800; s++) if (makePlanet(s * 7919).arch.id === want) return s * 7919;
+    return 7919;
+  };
+  const standOn = (P, minH) => {                 // walk out to open, dry ground
+    for (let i = 0; i < 3000; i++) {
+      const a = i * 2.399, d = 30 + i * 1.4;
+      const x = Math.cos(a) * d, z = Math.sin(a) * d;
+      const h = P.height(x, z);
+      if (h > P.waterLevel + (minH || 4)) return [x, h, z];
+    }
+    return [0, P.height(0, 0), 0];
+  };
+  // Aim at the most dramatic land in view rather than at empty ocean.
+  const faceLand = (P, from) => {
+    let bestYaw = 0, best = -1e9;
+    for (let i = 0; i < 32; i++) {
+      const yaw = i / 32 * Math.PI * 2;
+      let s = 0;
+      for (let d = 60; d <= 340; d += 40) {
+        const x = from[0] - Math.sin(yaw) * d, z = from[2] - Math.cos(yaw) * d;
+        const h = P.height(x, z);
+        s += h > P.waterLevel ? (h - from[1]) * 0.5 + 10 : -60;
+      }
+      if (s > best) { best = s; bestYaw = yaw; }
+    }
+    return bestYaw;
+  };
+
+  const poses = {
+    surface() {
+      newPlanet(seedFor('Lush'));
+      const P = world.planet;
+      player.pos = standOn(P, 8);
+      player.pos[1] += 16;
+      flatYaw = faceLand(P, player.pos); flatPitch = -0.05;
+      nav.charge = 62;
+    },
+    markers() {
+      newPlanet(seedFor('Exotic'));
+      const P = world.planet;
+      player.pos = standOn(P, 6);
+      player.pos[1] += 4;
+      flatYaw = faceLand(P, player.pos); flatPitch = 0.0;
+      hud.inv.ferrite = 148; hud.inv.carbon = 96; nav.charge = 74;
+    },
+    cockpit() {
+      newPlanet(seedFor('Scorched'));
+      const P = world.planet;
+      const p = standOn(P, 6);
+      ship.pos = [p[0], p[1] + 110, p[2]];
+      const yaw = faceLand(P, ship.pos);
+      ship.aim = [-Math.sin(yaw), -0.06, -Math.cos(yaw)];
+      ship.piloting = true; ship.throttle = 0.8; ship.vel = V3.scale(ship.aim, 70);
+      flatYaw = yaw; flatPitch = -0.06;
+      nav.charge = 88;
+    },
+    orbit() {
+      newPlanet(seedFor('Lush'));
+      const P = world.planet;
+      const p = standOn(P, 6);
+      ship.pos = [p[0], p[1] + 1900, p[2]];
+      ship.piloting = true; ship.aim = [0, -0.5, 1]; ship.throttle = 0.45; ship.vel = [0, 0, 40];
+      // Face the sun-lit side so the surface below actually reads.
+      flatYaw = Math.atan2(-P.sunDir[0], -P.sunDir[2]); flatPitch = -0.62;
+      nav.charge = 100;
+    },
+    galaxy() {
+      nav.open = true; nav.mode = M_GALAXY; nav.anim = 1; nav.zoom = 1.85;
+      nav.target = { star: (nav.curStar + 46) % nav.galaxy.length, planet: 0 };
+      nav.yaw = 0.5; flatPitch = -0.34; nav.charge = 96;
+    },
+    system() {
+      nav.open = true; nav.mode = M_SYSTEM; nav.anim = 1; nav.zoom = 1.8;
+      nav.viewStar = nav.curStar; nav.yaw = 0.35; flatPitch = -0.34; nav.charge = 96;
+      for (let i = 0; i < 3; i++) nav.visited.add(nav.curStar + ':' + i);
+    },
+    holomap() {
+      newPlanet(seedFor('Barren'));
+      const P = world.planet;
+      player.pos = standOn(P, 6); player.pos[1] += 10;
+      nav.open = true; nav.mode = M_SURFACE; nav.anim = 1; nav.zoom = 1.8;
+      nav.yaw = 0.4; flatPitch = -0.34; nav.charge = 55;
+    },
+    mission() {
+      nav.open = true; nav.mode = M_MISSION; nav.anim = 1;
+      stats.salvaged = 2; stats.mined = 60; stats.scans = 3; stats.boarded = 1;
+      nav.charge = 47; flatPitch = -0.52; mission.dirty = true;
+    },
+  };
+  (poses[id] || poses.surface)();
+  world.center = [1e9, 1e9];
+  if (!ship.piloting) placeShip(world.planet);
+}
+boot();
+</script>
+</body>
+</html>
