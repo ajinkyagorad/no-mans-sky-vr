@@ -323,6 +323,32 @@ const HEAD = `#version 300 es
 precision highp float;
 `;
 
+/* Filmic tone mapping. Everything used to clip straight to white the moment a
+   bright sun hit a light surface; this rolls the highlights off instead. */
+const TONE_LIB = `
+uniform float uExposure;
+vec3 aces(vec3 x){
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+}
+vec3 finish(vec3 col){
+  col = aces(col * uExposure);
+  return pow(col, vec3(0.94));            // a touch of contrast back
+}
+`;
+
+// Sampled twice per surface, this is what makes rock look like rock.
+const DETAIL_LIB = `
+uniform sampler2D uDetail;
+// Project the detail map down all three axes so cliffs never smear.
+vec4 triplanar(vec3 p, vec3 n, float s){
+  vec3 bw = abs(n); bw *= bw; bw *= bw;
+  bw /= max(bw.x + bw.y + bw.z, 1e-4);
+  return texture(uDetail, p.zy * s) * bw.x
+       + texture(uDetail, p.xz * s) * bw.y
+       + texture(uDetail, p.xy * s) * bw.z;
+}
+`;
+
 // Sky, lighting and fog helpers shared by most fragment shaders.
 const SKY_LIB = `
 uniform vec3 uZenith, uHorizon, uGround, uSunDir, uSunCol;
@@ -357,6 +383,15 @@ vec3 shade(vec3 n, vec3 albedo, vec3 view){
   col += uHorizon * rim * 0.22 * albedo;
   return col;
 }
+// As above plus a Blinn-Phong lobe, so wet rock and metal actually catch light.
+vec3 shadeSpec(vec3 n, vec3 albedo, vec3 view, float gloss, float amount, float ao){
+  vec3 col = shade(n, albedo, view) * ao;
+  vec3 hv = normalize(uSunDir + view);
+  float s = pow(clamp(dot(n, hv), 0.0, 1.0), gloss);
+  float fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, view), 0.0, 1.0), 5.0);
+  col += uSunCol * s * amount * fres * clamp(dot(n, uSunDir) * 4.0, 0.0, 1.0);
+  return col;
+}
 `;
 
 const NOISE_LIB = `
@@ -386,7 +421,7 @@ void main(){
   vec4 far = uInvVP * vec4(p, 1.0, 1.0);
   vRay = far.xyz / far.w - uCam;
   gl_Position = vec4(p, 1.0, 1.0);
-}`, HEAD + SKY_LIB + NOISE_LIB + `
+}`, HEAD + SKY_LIB + NOISE_LIB + TONE_LIB + `
 in vec3 vRay;
 out vec4 fragColor;
 uniform float uTime, uStars, uCloud;
@@ -446,7 +481,7 @@ void main(){
     vec3 lit = mix(uHorizon * 1.25, uSunCol * 1.25, clamp(dot(d, uSunDir) * 0.5 + 0.5, 0.0, 1.0));
     col = mix(col, lit, c * fade * uCloud * (1.0 - uSpace));
   }
-  fragColor = vec4(col, 1.0);
+  fragColor = vec4(finish(col), 1.0);
 }`);
 
 /* ------------------------------------------------------------ terrain --- */
@@ -454,21 +489,49 @@ const progTerrain = program(HEAD + `
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec3 aNrm;
 layout(location=2) in vec3 aCol;
+layout(location=3) in float aAO;
 uniform mat4 uVP;
 out vec3 vN, vC, vW;
-void main(){ vN = aNrm; vC = aCol; vW = aPos; gl_Position = uVP * vec4(aPos, 1.0); }
-`, HEAD + SKY_LIB + `
+out float vAO;
+void main(){ vN = aNrm; vC = aCol; vW = aPos; vAO = aAO; gl_Position = uVP * vec4(aPos, 1.0); }
+`, HEAD + SKY_LIB + DETAIL_LIB + TONE_LIB + `
 in vec3 vN, vC, vW;
+in float vAO;
 out vec4 fragColor;
-uniform vec3 uCam;
+uniform vec3 uCam, uRock;
 void main(){
   vec3 n = normalize(vN);
   vec3 view = normalize(uCam - vW);
-  // Cheap procedural grain so large flat areas keep some texture.
-  float g = fract(sin(dot(floor(vW.xz * 5.0), vec2(12.9898, 78.233))) * 43758.5453);
-  vec3 albedo = vC * (0.98 + 0.035 * g);
-  vec3 col = shade(n, albedo, view);
-  fragColor = vec4(applyFog(col, vW, uCam), 1.0);
+  float dist = distance(vW, uCam);
+
+  // Two scales of detail: coarse patches of material, fine surface grain.
+  // The fine layer fades out with distance so it never turns into noise.
+  vec4 macro = triplanar(vW, n, 0.021);
+  float fine = clamp(1.0 - dist / 90.0, 0.0, 1.0);
+  vec4 micro = fine > 0.01 ? triplanar(vW, n, 0.20) : vec4(0.5, 0.5, 1.0, 0.5);
+
+  // Perturb the surface normal with the detail map's slopes.
+  vec2 slope = (macro.xy - 0.5) * 1.25 + (micro.xy - 0.5) * 1.0 * fine;
+  vec3 nd = normalize(n + vec3(slope.x, 0.0, slope.y) * (1.0 - abs(n.y) * 0.35));
+
+  // Break up the flat vertex colour with the height channel.
+  float v = macro.a * 0.78 + micro.a * 0.22 * fine;
+  vec3 albedo = vC * (0.74 + 0.52 * v);
+
+  // Sedimentary banding, only where the ground is steep enough to be exposed.
+  float steep = clamp(1.0 - abs(n.y) * 1.15, 0.0, 1.0);
+  float strata = sin(vW.y * 0.85 + macro.a * 4.0) * 0.5 + 0.5;
+  albedo *= mix(1.0, 0.80 + 0.40 * strata, steep * 0.8);
+  // Per-pixel rock on the true geometric slope keeps cliff edges crisp instead
+  // of smeared across a 2.7 m vertex.
+  float rocky = smoothstep(0.34, 0.72, steep + (macro.a - 0.5) * 0.30);
+  albedo = mix(albedo, uRock * (0.68 + 0.62 * v), rocky * 0.85);
+  albedo *= 1.0 - vAO * 0.45;
+
+  float wetness = clamp(1.0 - abs(nd.y), 0.0, 1.0);
+  vec3 col = shadeSpec(nd, albedo, view, mix(18.0, 60.0, wetness),
+                       0.10 + wetness * 0.16, 1.0 - vAO * 0.35);
+  fragColor = vec4(finish(applyFog(col, vW, uCam)), 1.0);
 }`);
 
 /* -------------------------------------------------- instanced scatter --- */
@@ -501,7 +564,7 @@ void main(){
   vN = n; vC = aCol * iRotTint.yzw; vE = iParams.z;
   vFade = 1.0 - smoothstep(iParams.w * 0.72, iParams.w, distance(vW.xz, uCam.xz));
   gl_Position = uVP * vec4(vW, 1.0);
-}`, HEAD + SKY_LIB + `
+}`, HEAD + SKY_LIB + DETAIL_LIB + TONE_LIB + `
 in vec3 vN, vC, vW;
 in float vE, vFade;
 out vec4 fragColor;
@@ -510,9 +573,17 @@ void main(){
   if (vFade < 0.02) discard;
   vec3 n = normalize(vN);
   vec3 view = normalize(uCam - vW);
-  vec3 col = shade(n, vC, view);
+  float dist = distance(vW, uCam);
+  vec3 albedo = vC;
+  if (dist < 55.0) {                       // close up, give leaves and rock grain
+    vec4 d = triplanar(vW, n, 0.55);
+    float k = clamp(1.0 - dist / 55.0, 0.0, 1.0);
+    albedo *= mix(1.0, 0.74 + 0.52 * d.a, k);
+    n = normalize(n + vec3(d.x - 0.5, 0.0, d.y - 0.5) * 0.8 * k);
+  }
+  vec3 col = shadeSpec(n, albedo, view, 26.0, 0.09, 1.0);
   col += vC * vE;
-  fragColor = vec4(applyFog(col, vW, uCam), vFade);
+  fragColor = vec4(finish(applyFog(col, vW, uCam)), vFade);
 }`);
 
 /* ------------------------------------- single objects (uModel matrix) --- */
@@ -537,11 +608,11 @@ void main(){
   vN = mat3(uModel) * aNrm;
   vC = aCol;
   gl_Position = uVP * wp;
-}`, HEAD + SKY_LIB + `
+}`, HEAD + SKY_LIB + DETAIL_LIB + TONE_LIB + `
 in vec3 vN, vC, vW;
 out vec4 fragColor;
 uniform vec3 uCam, uTint;
-uniform float uEmissive, uAlpha, uFogged, uUnlit;
+uniform float uEmissive, uAlpha, uFogged, uUnlit, uGloss;
 void main(){
   vec3 n = normalize(vN);
   vec3 view = normalize(uCam - vW);
@@ -553,8 +624,13 @@ void main(){
     float rim = pow(1.0 - clamp(abs(dot(n, view)), 0.0, 1.0), 2.0);
     col = albedo * uEmissive * (0.70 + rim * 0.85);
   } else {
-    col = shade(n, albedo, view) + albedo * uEmissive;
+    // Hull plating, hide and bark all read better with a little surface break-up.
+    vec4 d = triplanar(vW, n, 1.6);
+    albedo *= 0.86 + 0.28 * d.a;
+    vec3 nd = normalize(n + vec3(d.x - 0.5, 0.0, d.y - 0.5) * 0.45);
+    col = shadeSpec(nd, albedo, view, uGloss, 0.22, 1.0) + albedo * uEmissive;
     if (uFogged > 0.5) col = applyFog(col, vW, uCam);
+    col = finish(col);
   }
   fragColor = vec4(col, uAlpha);
 }`);
@@ -577,21 +653,33 @@ void main(){
   vW = p;
   vN = normalize(vec3(-dx, 1.0, -dz));
   gl_Position = uVP * vec4(p, 1.0);
-}`, HEAD + SKY_LIB + `
+}`, HEAD + SKY_LIB + DETAIL_LIB + TONE_LIB + `
 in vec3 vW, vN;
 out vec4 fragColor;
 uniform vec3 uCam, uDeep, uShallow;
+uniform float uTime;
 void main(){
   vec3 n = normalize(vN);
   vec3 view = normalize(uCam - vW);
+  float dist = distance(vW, uCam);
+
+  // Two ripple layers scrolling against each other, faded out at range so the
+  // far ocean stays glassy instead of shimmering.
+  float k = clamp(1.0 - dist / 260.0, 0.0, 1.0);
+  vec4 r1 = texture(uDetail, vW.xz * 0.085 + vec2(uTime * 0.014, uTime * 0.009));
+  vec4 r2 = texture(uDetail, vW.xz * 0.031 - vec2(uTime * 0.007, uTime * 0.011));
+  n = normalize(n + vec3((r1.x - 0.5) * 1.1 + (r2.x - 0.5) * 0.7, 0.0,
+                         (r1.y - 0.5) * 1.1 + (r2.y - 0.5) * 0.7) * k);
+
   float fres = pow(1.0 - clamp(dot(n, view), 0.0, 1.0), 3.5);
   vec3 refl = skyBase(normalize(reflect(-view, n)));
   vec3 body = mix(uDeep, uShallow, clamp(n.y * 0.5, 0.0, 1.0));
   vec3 col = mix(body, refl, clamp(fres * 1.2 + 0.08, 0.0, 1.0));
   vec3 hv = normalize(uSunDir + view);
-  col += uSunCol * pow(clamp(dot(n, hv), 0.0, 1.0), 220.0) * 2.2;
+  col += uSunCol * pow(clamp(dot(n, hv), 0.0, 1.0), 220.0) * 2.6;
+  col += uSunCol * pow(clamp(dot(n, hv), 0.0, 1.0), 26.0) * 0.10;   // sheen
   col = applyFog(col, vW, uCam);
-  fragColor = vec4(col, 0.90);
+  fragColor = vec4(finish(col), 0.92);
 }`);
 
 /* --------------------------------------------------------- particles --- */
@@ -1025,6 +1113,65 @@ function meshBeam() {   // unit tube along +Z, radius 1, length 1
 }
 
 function meshSphereUnit(col) { return add(G(), prim.sphere(1, 12, 9), trs([0, 0, 0], [0, 0, 0], [1, 1, 1]), col); }
+/* ------------------------------------------------- detail texture ------- */
+/* A seamlessly tiling fBm surface, baked once into a normal map (RG = slope,
+   B = up, A = height). Sampling this is far cheaper than evaluating noise per
+   pixel, and it is what gives every surface its grain. */
+function makeDetailTexture() {
+  const N = 256;
+  const h = new Float32Array(N * N);
+  const rnd = mulberry32(0xd37a11);
+  // Deliberately stops at 64: finer octaves just alias into shimmer in motion.
+  const octaves = [[4, 1], [8, 0.62], [16, 0.36], [32, 0.20], [64, 0.09]];
+  for (const [freq, amp] of octaves) {
+    const lat = new Float32Array(freq * freq);
+    for (let i = 0; i < lat.length; i++) lat[i] = rnd();
+    for (let y = 0; y < N; y++) {
+      const fy = y / N * freq, y0 = Math.floor(fy), ty = smooth(fy - y0);
+      const ya = y0 % freq, yb = (ya + 1) % freq;
+      for (let x = 0; x < N; x++) {
+        const fx = x / N * freq, x0 = Math.floor(fx), tx = smooth(fx - x0);
+        const xa = x0 % freq, xb = (xa + 1) % freq;
+        h[y * N + x] += amp * lerp(lerp(lat[ya * freq + xa], lat[ya * freq + xb], tx),
+                                   lerp(lat[yb * freq + xa], lat[yb * freq + xb], tx), ty);
+      }
+    }
+  }
+  let mn = 1e9, mx = -1e9;
+  for (let i = 0; i < h.length; i++) { if (h[i] < mn) mn = h[i]; if (h[i] > mx) mx = h[i]; }
+  const inv = 1 / Math.max(mx - mn, 1e-6);
+  for (let i = 0; i < h.length; i++) h[i] = (h[i] - mn) * inv;
+
+  const at = (x, y) => h[(((y % N) + N) % N) * N + (((x % N) + N) % N)];
+  const data = new Uint8Array(N * N * 4);
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const n = V3.norm([-(at(x + 1, y) - at(x - 1, y)) * 7, 1, -(at(x, y + 1) - at(x, y - 1)) * 7]);
+    const o = (y * N + x) * 4;
+    data[o] = (n[0] * 0.5 + 0.5) * 255;
+    data[o + 1] = (n[2] * 0.5 + 0.5) * 255;
+    data[o + 2] = (n[1] * 0.5 + 0.5) * 255;
+    data[o + 3] = h[y * N + x] * 255;
+  }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, N, N, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+  if (aniso) {
+    const max = Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT));
+    gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, max);
+  }
+  return tex;
+}
+const detailTex = makeDetailTexture();
+gl.activeTexture(gl.TEXTURE1);
+gl.bindTexture(gl.TEXTURE_2D, detailTex);   // unit 1 stays bound for the session
+gl.activeTexture(gl.TEXTURE0);
+
 /* ================================================ procedural planetology === */
 function hsv(h, s, v) {
   h = (h % 1 + 1) % 1;
@@ -1263,10 +1410,14 @@ function buildChunk(cx, cz) {
       const h = H(i, j);
       const n = V3.norm([H(i - 1, j) - H(i + 1, j), 2 * step, H(i, j - 1) - H(i, j + 1)]);
       const c = P.colorAt(x, z, h, 1 - n[1]);
+      // Cheap baked occlusion: how far this point sits below its surroundings.
+      const around = (H(i - 1, j) + H(i + 1, j) + H(i, j - 1) + H(i, j + 1)) * 0.25;
+      const ao = clamp((around - h) / (step * 1.6), 0, 1);
       const o = (j * N + i) * 10;
       buf[o] = x; buf[o + 1] = h; buf[o + 2] = z;
       buf[o + 3] = n[0]; buf[o + 4] = n[1]; buf[o + 5] = n[2];
       buf[o + 6] = c[0]; buf[o + 7] = c[1]; buf[o + 8] = c[2];
+      buf[o + 9] = ao;
     }
   }
   const mesh = makeMeshRaw(buf, TERRAIN_IDX);
@@ -1693,6 +1844,7 @@ function drawHud() {
     c.fillText(goalNow ? goalNow.hint
                        : 'TRIGGER mine  ·  L-TRIGGER scan  ·  Y open nav map', 22, H - 24);
   }
+  gl.activeTexture(gl.TEXTURE0);      // unit 1 permanently holds the detail map
   gl.bindTexture(gl.TEXTURE_2D, hud.tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, hud.canvas);
@@ -2042,10 +2194,14 @@ function useProg(pr, VP, cam) {
   if (u.uFogDensity) gl.uniform1f(u.uFogDensity, P.fog * (1 - spaceMix * 0.96));
   if (u.uSpace) gl.uniform1f(u.uSpace, spaceMix);
   if (u.uTime) gl.uniform1f(u.uTime, t_now);
+  if (u.uExposure) gl.uniform1f(u.uExposure, 1.15);
+  if (u.uDetail) gl.uniform1i(u.uDetail, 1);
+  if (u.uRock) gl.uniform3fv(u.uRock, P.rock);
   return u;
 }
 
-let objUnlit = 0;   // set while drawing holograms / energy effects
+let objUnlit = 0;    // set while drawing holograms / energy effects
+let objGloss = 28;   // Blinn-Phong exponent: low for hide and bark, high for hull
 function drawObject(mesh, model, tint, emissive, alpha, fogged, flap, phase) {
   const u = progObj.u;
   gl.uniform1f(u.uUnlit, objUnlit);
@@ -2056,6 +2212,7 @@ function drawObject(mesh, model, tint, emissive, alpha, fogged, flap, phase) {
   gl.uniform1f(u.uFogged, fogged === false ? 0 : 1);
   gl.uniform1f(u.uFlap, flap || 0);
   gl.uniform1f(u.uPhase, phase || 0);
+  gl.uniform1f(u.uGloss, objGloss);
   drawMesh(mesh);
 }
 
@@ -2092,6 +2249,7 @@ function renderScene(viewMat, projMat, cam) {
 
   // --- creatures, hands, tool, beam ---
   useProg(progObj, VP, cam);
+  objGloss = 12;                       // hide and feathers, not chrome
   for (const f of fauna.flyers) {
     if (!f.pos) continue;
     M4.aim(tmpC, f.pos, f.fwd, [0, 1, 0]); scaleCols(tmpC, f.scale);
@@ -2102,6 +2260,7 @@ function renderScene(viewMat, projMat, cam) {
     M4.aim(tmpC, gr.pos, gr.fwd, [0, 1, 0]); scaleCols(tmpC, gr.scale);
     drawObject(fauna.grazerMesh, tmpC, [1, 1, 1], 0, 1, true, 0, 0);
   }
+  objGloss = 60;                       // suit and tooling
   if (input.gripL) drawObject(handMesh, input.gripL, [1, 1, 1], 0.05, 1, false, 0, 0);
   if (input.gripR) drawObject(handMesh, input.gripR, [1, 1, 1], 0.05, 1, false, 0, 0);
   if (input.aimMat && !ship.piloting) {
@@ -2109,6 +2268,7 @@ function renderScene(viewMat, projMat, cam) {
     drawObject(toolMesh, tmpC, [1, 1, 1], beam.heat * 0.5, 1, false, 0, 0);
   }
   renderShip(VP, cam);
+  objGloss = 28;
 
   // --- water ---
   if (P.waterLevel > -9000) {
@@ -3014,6 +3174,7 @@ function drawMission() {
   c.fillStyle = 'rgba(150,200,235,0.6)'; c.font = '15px Consolas, monospace';
   c.fillText('TRIGGER: set course to nearest site   ·   LEFT X: next map', 26, H - 24);
 
+  gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, mission.tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, mission.canvas);
@@ -3188,6 +3349,7 @@ function drawMarkLabel(title, sub, col) {
   c.fillText(title, 46, 62);
   c.fillStyle = 'rgba(215,240,255,0.85)'; c.font = '25px Consolas, monospace';
   c.fillText(sub, 46, 92);
+  gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, marks.tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, marks.canvas);
@@ -3320,7 +3482,7 @@ const ship = {
    see nose, wings and engines around you rather than the inside of a box. */
 function makeShipMesh(P) {
   const m = G();
-  const hull = mix3([0.40, 0.44, 0.50], P.glow, 0.14);
+  const hull = mix3([0.24, 0.27, 0.32], P.glow, 0.12);
   const dark = [0.13, 0.15, 0.19];
   const trim = P.glow;
   // The pilot's eye sits at roughly +0.45; the whole airframe hangs below that
@@ -3334,8 +3496,9 @@ function makeShipMesh(P) {
   }
   // wings
   for (const s of [-1, 1]) {
-    add(m, prim.box(2.6, 0.16, 1.5), trs([s * 1.9, -1.22, -0.35], [0, 0, s * 0.16], [1, 1, 1]), hull);
-    add(m, prim.box(0.5, 0.14, 0.9), trs([s * 3.0, -1.10, -0.45], [0, 0, s * 0.40], [1, 1, 1]), trim);
+    // Swept back and dropped, so they frame the view instead of filling it.
+    add(m, prim.box(2.4, 0.15, 1.4), trs([s * 1.85, -1.52, -1.15], [0, 0, s * 0.22], [1, 1, 1]), hull);
+    add(m, prim.box(0.45, 0.13, 0.8), trs([s * 2.9, -1.34, -1.25], [0, 0, s * 0.46], [1, 1, 1]), trim);
     // engines
     add(m, prim.cyl(0.34, 0.30, 1.9, 8), trs([s * 1.5, -1.20, -1.9], [Math.PI / 2, 0, 0], [1, 1, 1]), dark);
     add(m, prim.cyl(0.27, 0.27, 0.16, 8), trs([s * 1.5, -1.20, -1.95], [Math.PI / 2, 0, 0], [1, 1, 1]), trim);
@@ -3440,23 +3603,28 @@ function updateShip(dt) {
   }
   // Point-to-fly: the ship follows where your right hand points. Comfortable
   // in VR because the player's frame never rolls or pitches.
-  const m = input.aimMat;
+  // With the hologram up, your hand is pointing at the map — not flying. Freeze
+  // the controls so selecting a destination cannot also throttle or steer you.
+  const m = nav.open ? null : input.aimMat;
   if (m) {
     const a = M4.xform(m, [0, 0.02, 0.34]), b = M4.xform(m, [0, 0.02, 1.34]);
     const dir = V3.norm(V3.sub(b, a));
     const k = Math.min(1, dt * 3.2);
     ship.aim = V3.norm(V3.add(V3.scale(ship.aim, 1 - k), V3.scale(dir, k)));
   }
-  ship.throttle += (input.trigger - ship.throttle) * Math.min(1, dt * 5);
+  const wantThrottle = nav.open ? 0 : input.trigger;
+  ship.throttle += (wantThrottle - ship.throttle) * Math.min(1, dt * 5);
 
   const inSpace = spaceMix > 0.55;
   const accel = inSpace ? 140 : 66;
   ship.vel = V3.add(ship.vel, V3.scale(ship.aim, ship.throttle * accel * dt));
 
   // Left stick climbs / strafes, left grip brakes.
-  ship.vel[1] += -input.moveZ * 26 * dt;
-  const rightV = V3.norm(V3.cross(ship.aim, [0, 1, 0]));
-  ship.vel = V3.add(ship.vel, V3.scale(rightV, input.moveX * 20 * dt));
+  if (!nav.open) {
+    ship.vel[1] += -input.moveZ * 26 * dt;
+    const rightV = V3.norm(V3.cross(ship.aim, [0, 1, 0]));
+    ship.vel = V3.add(ship.vel, V3.scale(rightV, input.moveX * 20 * dt));
+  }
   if (input.sprint > 0.5) ship.vel = V3.scale(ship.vel, Math.max(0, 1 - 2.6 * dt));
 
   ship.vel = V3.scale(ship.vel, Math.max(0, 1 - (inSpace ? 0.05 : 0.5) * dt));
@@ -3499,6 +3667,7 @@ function updateShip(dt) {
 function renderShip(VP, cam) {
   if (!ship.mesh) return;
   useProg(progObj, VP, cam);
+  objGloss = 110;                      // painted metal hull
   M4.aim(tmpC, ship.pos, ship.aim, [0, 1, 0]);
   drawObject(ship.mesh, tmpC, [1, 1, 1], ship.throttle * 0.10, 1, true, 0, 0);
   if (!ship.piloting) return;
